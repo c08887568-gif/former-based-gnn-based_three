@@ -72,14 +72,14 @@ class VIT_GIN_Parallel(nn.Module):
         if 'orthogonal' in loss_config:
             # Orthogonal loss
             reg = loss_config['orthogonal']['reg'] 
-            orth_loss = torch.zeros(1).to(pred.device)
+            orth_loss = torch.zeros((), device=pred.device)
             for name, param in self.named_parameters():
                 if 'bias' not in name:
                     param_flat = param.view(param.shape[0], -1)
                     sym = torch.mm(param_flat, torch.t(param_flat))
                     sym -= torch.eye(param_flat.shape[0]).to(param.device)
                     orth_loss += (reg * sym.abs().sum())
-            loss += orth_loss.item()
+            loss = loss + orth_loss
         return loss
     def train_step(self,data,label,optimizer,loss_config):
         # 模型训练步骤

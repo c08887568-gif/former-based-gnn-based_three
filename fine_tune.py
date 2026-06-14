@@ -6,7 +6,7 @@ import time
 import numpy as np
 from dataset import GraphDataset
 from models.Encoder import VIT_GIN_Parallel
-from utils.utils import WarmupCosineLR
+from utils.utils import WarmupCosineLR, get_default_device, to_edge_index
 from fieldroaddatapipeline.dataloader import FieldRoadDataLoader
 from torch_geometric.data import Data
 import matplotlib.pyplot as plt
@@ -37,7 +37,7 @@ train_loader = FieldRoadDataLoader(train_dataset, batch_size=1, shuffle=True, dr
 valid_loader = FieldRoadDataLoader(valid_dataset, batch_size=1, shuffle=False, drop_last=True)
 test_loader = FieldRoadDataLoader(test_dataset, batch_size=1, shuffle=False, drop_last=True)
 ####################################超参数
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = get_default_device()
 #torch.autograd.set_detect_anomaly(True)
 total_epochs =300
 # Set the random seed if needed
@@ -100,6 +100,12 @@ train_losses = []
 valid_losses = []
 train_accuracies = []
 valid_accuracies = []
+class_result_train = None
+class_result_valid = None
+class_result_test_train = None
+class_result_test_valid = None
+final_test_train = False
+final_test_valid = False
 for pass_num in range(total_epochs):
     model.train()
     epoch_start_time = time.time()
@@ -111,11 +117,7 @@ for pass_num in range(total_epochs):
     for batch_id, (points, labels, adjs, trace_id) in enumerate(train_loader()):
         points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
         labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-        adjs = adjs.clone().detach().to(torch.float32).squeeze(0).to(device)
-        # 找到邻接矩阵中非零元素的索引
-        rows, cols = torch.nonzero(adjs, as_tuple=True)
-        # 按照源节点和目标节点的顺序构建新的张量
-        edge_index = torch.stack([rows, cols]).to(device)
+        edge_index = to_edge_index(adjs, device)
         data = Data(x=points, edge_index=edge_index, y=labels)
         pred, loss, acc = model.train_step(data, labels,optimizer, loss_config)
         trajectory_length = points.shape[0]
@@ -140,6 +142,7 @@ for pass_num in range(total_epochs):
         final_test_train = True
     scheduler.step()
     with torch.no_grad():
+        model.eval()
         valid_loss_total = 0.0
         valid_acc_total = 0.0
         num_samples = 0
@@ -148,11 +151,7 @@ for pass_num in range(total_epochs):
         for batch_id, (points, labels, adjs, trace_id) in enumerate(valid_loader()):
             points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
             labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-            adjs = adjs.clone().detach().to(torch.float32).squeeze(0).to(device)
-            # 找到邻接矩阵中非零元素的索引
-            rows, cols = torch.nonzero(adjs, as_tuple=True)
-            # 按照源节点和目标节点的顺序构建新的张量
-            edge_index = torch.stack([rows, cols]).to(device)
+            edge_index = to_edge_index(adjs, device)
             data = Data(x=points, edge_index=edge_index, y=labels)
             pred, loss, acc = model.valid_step(data, labels, None)
             trajectory_length = points.shape[0]
@@ -191,25 +190,23 @@ for pass_num in range(total_epochs):
         )
         all_predictions = []
         all_labels = []
+        test_num_samples = 0
         for batch_id, (points, labels,adjs,trace_id) in enumerate(test_loader()):
             points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
             labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-            adjs = adjs.clone().detach().to(torch.float32).squeeze(0).to(device)
-            # 找到邻接矩阵中非零元素的索引
-            rows, cols = torch.nonzero(adjs, as_tuple=True)
-            # 按照源节点和目标节点的顺序构建新的张量
-            edge_index = torch.stack([rows,cols]).to(device)
+            edge_index = to_edge_index(adjs, device)
             data = Data(x=points, edge_index=edge_index, y=labels)
             pred= model.test_step(data)
             all_predictions.extend(pred.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
+            test_num_samples += points.shape[0]
         all_predictions = np.array(all_predictions)
         all_labels = np.array(all_labels)
         class_result = model.calculate_classification_metrics(all_predictions,all_labels)
         end_time = time.time()
         epoch_test_time = end_time - valid_end_time
         total_test_time += epoch_test_time
-        test_fps = num_samples / epoch_test_time
+        test_fps = test_num_samples / epoch_test_time
         logger.log_test_info(epoch_test_time, test_fps, class_result)
         if final_test_train == True:
             class_result_test_train = class_result

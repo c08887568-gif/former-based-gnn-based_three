@@ -200,17 +200,18 @@ class VIT(nn.Module):
         N, L, D = x.shape
         len_keep = int(L * (1 - mask_ratio))
 
-        noise = torch.rand(N, L)
+        noise = torch.rand(N, L, device=x.device)
         ids_shuffle = torch.argsort(noise, dim=1)
         ids_shuffle[:,:len_keep] =torch.sort(ids_shuffle[:, :len_keep], dim=1)[0]
         ids_restore = torch.argsort(ids_shuffle, dim=1)
         ids_keep = ids_shuffle[:, :len_keep]
-        x_masked = x[torch.arange(N)[:, None], ids_keep]
+        batch_indices = torch.arange(N, device=x.device)[:, None]
+        x_masked = x[batch_indices, ids_keep]
 
-        mask = torch.ones(N, L)
+        mask = torch.ones(N, L, device=x.device)
         mask[:, :len_keep] = 0
-        mask = mask[torch.arange(N)[:, None], ids_restore]
-        return x_masked, mask.to(x.device), ids_restore.to(x.device)
+        mask = mask[batch_indices, ids_restore]
+        return x_masked, mask, ids_restore
     
     def forward_features(self, x, mask_ratio=0):
         B = x.size(0)
@@ -238,14 +239,14 @@ class VIT(nn.Module):
         if 'orthogonal' in loss_config:
             # Orthogonal loss
             reg = loss_config['orthogonal']['reg'] 
-            orth_loss = torch.zeros(1).to(pred.device)
+            orth_loss = torch.zeros((), device=pred.device)
             for name, param in self.named_parameters():
                 if 'bias' not in name:
                     param_flat = param.view(param.shape[0], -1)
                     sym = torch.mm(param_flat, torch.t(param_flat))
                     sym -= torch.eye(param_flat.shape[0]).to(param.device)
                     orth_loss += (reg * sym.abs().sum())
-            loss += orth_loss.item()
+            loss = loss + orth_loss
         return loss
     def train_step(self,x,label,optimizer,loss_config):
         # 模型训练步骤
@@ -318,4 +319,3 @@ class VIT(nn.Module):
                 remove_thop_hooks_and_attributes(child)
 
         self.apply(remove_thop_hooks_and_attributes)
-

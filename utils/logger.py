@@ -153,7 +153,7 @@ class Logger:
         best_valid_acc_str = f"Best Valid Acc: {best_valid_acc:.4f}, " if best_valid_acc is not None else ""
         
         train_loss_str = f"Train Loss: {train_loss:.4f}, " if train_loss is not None else ""
-        valid_loss_str = f"Valid Acc: {valid_loss:.4f}, " if valid_loss is not None else ""
+        valid_loss_str = f"Valid Loss: {valid_loss:.4f}, " if valid_loss is not None else ""
         # Log train information
         self.logger_runner.info(f"{train_loss_str}{train_acc_str}Training Time: {train_time*1000:.4f} ms, Train FPS: {train_fps:.0f}")
 

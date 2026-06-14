@@ -7,7 +7,7 @@ import time
 import numpy as np
 from models.Pretrain import Pretrain_Parallel
 from dataset import GraphDataset
-from utils.utils import WarmupCosineLR
+from utils.utils import WarmupCosineLR, get_default_device, to_edge_index
 from fieldroaddatapipeline.dataloader import FieldRoadDataLoader
 from torch_geometric.data import Data
 from utils.logger import Logger
@@ -37,7 +37,7 @@ train_loader = FieldRoadDataLoader(train_dataset, batch_size=1, shuffle=True, dr
 valid_loader = FieldRoadDataLoader(valid_dataset, batch_size=1, shuffle=False, drop_last=True)
 test_loader = FieldRoadDataLoader(test_dataset, batch_size=1, shuffle=False, drop_last=True)
 ####################################超参数
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = get_default_device()
 #torch.autograd.set_detect_anomaly(True)
 total_epochs =10
 # Set the random seed if needed
@@ -93,6 +93,8 @@ best_valid_loss = 1000
 total_train_time=0
 total_valid_time=0
 total_test_time=0
+final_loss = False
+final_pretrain_result = None
 for pass_num in range(total_epochs):
     model.train()
     epoch_start_time = time.time()
@@ -101,11 +103,7 @@ for pass_num in range(total_epochs):
     for batch_id, (points, labels,adjs,trace_id) in enumerate(train_loader()):
         points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
         labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-        adjs = adjs.clone().detach().to(torch.float32).squeeze(0).to(device)
-        # 找到邻接矩阵中非零元素的索引
-        rows, cols = torch.nonzero(adjs, as_tuple=True)
-        # 按照源节点和目标节点的顺序构建新的张量
-        edge_index = torch.stack([rows, cols]).to(device)
+        edge_index = to_edge_index(adjs, device)
         data = Data(x=points, edge_index=edge_index, y=labels)
         loss= model.train_step(data, mask_ratio_image=0.75, mask_ratio_graph=0.5,optimizer=optimizer,loss_config=loss_config)
         trajectory_length = points.shape[0]
@@ -125,11 +123,7 @@ for pass_num in range(total_epochs):
         for batch_id, (points, labels,adjs,trace_id) in enumerate(valid_loader()):
             points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
             labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-            adjs = adjs.clone().detach().to(torch.float32).squeeze(0).to(device)
-            # 找到邻接矩阵中非零元素的索引
-            rows, cols = torch.nonzero(adjs, as_tuple=True)
-            # 按照源节点和目标节点的顺序构建新的张量
-            edge_index = torch.stack([rows, cols]).to(device)
+            edge_index = to_edge_index(adjs, device)
             data = Data(x=points, edge_index=edge_index, y=labels)
             loss = model.valid_step(data, mask_ratio_image=0.75, mask_ratio_graph=0.5,loss_config=None)
             trajectory_length = points.shape[0]
@@ -163,11 +157,7 @@ for pass_num in range(total_epochs):
         for batch_id, (points, labels,adjs,trace_id) in enumerate(test_loader()):
             points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
             labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-            adjs = adjs.clone().detach().to(torch.float32).squeeze(0).to(device)
-            # 找到邻接矩阵中非零元素的索引
-            rows, cols = torch.nonzero(adjs, as_tuple=True)
-            # 按照源节点和目标节点的顺序构建新的张量
-            edge_index = torch.stack([rows, cols]).to(device)
+            edge_index = to_edge_index(adjs, device)
             data = Data(x=points, edge_index=edge_index, y=labels)
             loss = model.test_step(data, mask_ratio_image=0.75, mask_ratio_graph=0.5,loss_config=None)
             trajectory_length = points.shape[0]
@@ -179,8 +169,9 @@ for pass_num in range(total_epochs):
         total_test_time += epoch_test_time
         test_fps = num_samples / epoch_test_time
         logger.log_test_info(epoch_test_time, test_fps, str(dict(loss=avg_test_loss)))
-        if final_loss is not None:
+        if final_loss:
             final_pretrain_result = str(dict(loss=avg_test_loss))
+            final_loss = False
 # Calculate average training and evaluation times
 avg_train_time = total_train_time / total_epochs
 avg_valid_time = total_valid_time / total_epochs

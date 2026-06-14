@@ -1,9 +1,8 @@
 import torch
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
-from .Encoder import VIT_GIN_Serial,VIT_GIN_Parallel
+from .Encoder import VIT_GIN_Parallel
 from .Decoder import TransformerDecoder
 from einops import rearrange
 from torch_geometric.data import Data
@@ -18,6 +17,7 @@ class Pretrain_Serial(nn.Module):
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  norm_pix_loss=False):
         super().__init__()
+        raise NotImplementedError("VIT_GIN_Serial is not available in the current Encoder implementation.")
         self.encoder = VIT_GIN_Serial(
             img_size=img_size,
             patch_size=patch_size, 
@@ -69,14 +69,14 @@ class Pretrain_Serial(nn.Module):
         if 'orthogonal' in loss_config:
             # Orthogonal loss
             reg = loss_config['orthogonal']['reg'] 
-            orth_loss = torch.zeros(1).to(imgs.device)
+            orth_loss = torch.zeros((), device=imgs.device)
             for name, param in self.named_parameters():
                 if 'bias' not in name:
                     param_flat = param.view(param.shape[0], -1)
                     sym = torch.mm(param_flat, torch.t(param_flat))
                     sym -= torch.eye(param_flat.shape[0]).to(param.device)
                     orth_loss += (reg * sym.abs().sum())
-            loss += orth_loss.item()
+            loss = loss + orth_loss
         
         return loss
 
@@ -200,14 +200,14 @@ class Pretrain_Parallel(nn.Module):
         if 'orthogonal' in loss_config:
             # Orthogonal loss
             reg = loss_config['orthogonal']['reg'] 
-            orth_loss = torch.zeros(1).to(imgs.device)
+            orth_loss = torch.zeros((), device=imgs.device)
             for name, param in self.named_parameters():
                 if 'bias' not in name:
                     param_flat = param.view(param.shape[0], -1)
                     sym = torch.mm(param_flat, torch.t(param_flat))
                     sym -= torch.eye(param_flat.shape[0]).to(param.device)
                     orth_loss += (reg * sym.abs().sum())
-            loss += orth_loss.item()
+            loss = loss + orth_loss
         
         return loss
 
@@ -217,7 +217,7 @@ class Pretrain_Parallel(nn.Module):
         latent_image, mask_image, ids_restore_image, latent_graph,mask_graph,ids_restore_graph = self.encoder.forward_features(x, edge_index, mask_ratio_image, mask_ratio_graph)
         pred_graph = self.decoder.forward_graph(latent_graph,edge_index,ids_restore_graph )
         pred_image = self.decoder.forward_image(latent_image, ids_restore_image)
-        loss = self.forward_loss(x, pred_image, pred_graph, mask_image,mask_graph)
+        loss = self.forward_loss(x, pred_image, pred_graph, mask_image,mask_graph,loss_config)
         return loss
     def train_step(self,data,mask_ratio_image,mask_ratio_graph,optimizer,loss_config):
         # 模型训练步骤

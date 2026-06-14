@@ -192,7 +192,7 @@ class TransformerDecoder(nn.Module):
         x = self.decoder_embed(x)
         mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
         x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
-        x_ = x_[torch.arange(x.shape[0])[:, None], ids_restore]
+        x_ = x_[torch.arange(x.shape[0], device=x.device)[:, None], ids_restore]
         x = torch.cat([x[:, :1, :], x_], dim=1)
         x = x + self.decoder_pos_embed
         for blk in self.decoder_blocks:
@@ -204,7 +204,7 @@ class TransformerDecoder(nn.Module):
 
     def forward_graph(self, x,adj,ids_restore):
         x = self.tradecoder_embed(x)
-        mask_tokens = self.tra_mask_token_decoder.repeat(ids_restore.shape[0] + 1 - x.shape[0], 1)
+        mask_tokens = self.tra_mask_token_decoder.repeat(ids_restore.shape[0] - x.shape[0], 1)
         x = torch.cat([x, mask_tokens], dim=0)
         x = x[ids_restore]
         x=x.unsqueeze(0)

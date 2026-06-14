@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 from models.Encoder import VIT_GIN_Parallel
 from dataset import GraphDataset
 from fieldroaddatapipeline.dataloader import FieldRoadDataLoader
+from utils.utils import get_default_device, to_edge_index
 import time
 from collections import defaultdict
 from utils.logger import Logger
@@ -23,7 +24,7 @@ test_dataset = GraphDataset(test_path, mode='predict', num_workers=12, max_len=1
 test_loader = FieldRoadDataLoader(test_dataset, batch_size=1, shuffle=False, drop_last=True)
 logger.log_dataset_info(None,None,test_dataset)
 # Load the model
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = get_default_device()
 model = VIT_GIN_Parallel(
     img_size=43, 
     patch_size=1, 
@@ -40,7 +41,7 @@ model = VIT_GIN_Parallel(
 ).to(device)
 logger.log_model_info(model)
 # Load the trained model weights
-model.load_state_dict(torch.load('./weights/model.pt'), strict=False)
+model.load_state_dict(torch.load('./weights/model.pt', map_location=device), strict=False)
 # Start testing
 model.eval()
 all_predictions = []
@@ -52,13 +53,9 @@ with torch.no_grad():
     for batch_id, (points, labels, adjs, trace_id, coordinates) in enumerate(test_loader()):
         points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
         labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-        adjs = adjs.clone().detach().to(torch.float32).squeeze(0).to(device)
         coordinates = coordinates.clone().detach().to(torch.float64).squeeze().to(device)
         trace_id = trace_id[0]
-        # 找到邻接矩阵中非零元素的索引
-        rows, cols = torch.nonzero(adjs, as_tuple=True)
-        # 按照源节点和目标节点的顺序构建新的张量
-        edge_index = torch.stack([rows, cols]).to(device)
+        edge_index = to_edge_index(adjs, device)
         data = Data(x=points, edge_index=edge_index, y=labels)
         predicts = model.test_step(data)
         predicts = torch.softmax(predicts, dim=1)

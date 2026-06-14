@@ -52,23 +52,23 @@ class GIN(nn.Module):
         L, D = x.shape
         len_keep = int(L * (1 - mask_ratio))
 
-        noise = torch.rand(L)
+        noise = torch.rand(L, device=x.device)
         ids_shuffle = torch.argsort(noise)
         ids_shuffle[:len_keep] = torch.sort(ids_shuffle[:len_keep])[0]
         ids_restore = torch.argsort(ids_shuffle)
 
         ids_keep = ids_shuffle[:len_keep]
         x_masked = x[ids_keep]
-        adj = torch.zeros((L, L), dtype=torch.float32)
+        adj = torch.zeros((L, L), dtype=torch.float32, device=x.device)
         adj[edge_index[0, :], edge_index[1,:]] = 1.0
         adj_masked = adj[:,ids_keep][ids_keep,:]
         rows, cols = torch.nonzero(adj_masked, as_tuple=True)
         # 按照源节点和目标节点的顺序构建新的张量
         edge_index_masked = torch.stack([rows, cols]).to(x.device)
-        mask = torch.ones( L)
+        mask = torch.ones(L, device=x.device)
         mask[:len_keep] = 0
         mask = mask[ ids_restore]
-        return x_masked, edge_index_masked,mask.to(x.device), ids_restore.to(x.device)
+        return x_masked, edge_index_masked,mask, ids_restore
     def forward_features(self, x, edge_index,mask_ratio=0):
         x, edge_index,mask,ids_restore  = self.graph_random_masking(x,edge_index ,mask_ratio)
         x = F.relu(self.conv1(x, edge_index))
@@ -89,14 +89,14 @@ class GIN(nn.Module):
         if 'orthogonal' in loss_config:
             # Orthogonal loss
             reg = loss_config['orthogonal']['reg'] 
-            orth_loss = torch.zeros(1).to(pred.device)
+            orth_loss = torch.zeros((), device=pred.device)
             for name, param in self.named_parameters():
                 if 'bias' not in name:
                     param_flat = param.view(param.shape[0], -1)
                     sym = torch.mm(param_flat, torch.t(param_flat))
                     sym -= torch.eye(param_flat.shape[0]).to(param.device)
                     orth_loss += (reg * sym.abs().sum())
-            loss += orth_loss.item()
+            loss = loss + orth_loss
         return loss
     def train_step(self,data,label,optimizer,loss_config):
         # 模型训练步骤

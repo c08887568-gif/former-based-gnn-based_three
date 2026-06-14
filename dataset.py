@@ -3,6 +3,7 @@ from  fieldroaddatapipeline.datareader import FieldRoadDataReader
 from  fieldroaddatapipeline.dataaugmenter import Compose,DataBalancer,Gaussian_Noise,Uniform_Noise,Pulse_Noise,get_statistics_dict
 import numpy as np
 import pandas as pd
+import torch
 from sklearn.preprocessing import MinMaxScaler
 __all__ = [
     "TraceDataset",
@@ -57,6 +58,31 @@ class GraphDataset(Dataset):
             f"  Num_workers: {self.num_workers}\n"
             f"  Max_len: {self.max_len}\n"
             f"  Drop_rate: {self.drop_rate}\n"
+            f")"
+        )
+
+class CachedGraphDataset(Dataset):
+    def __init__(self, cache_path, mode='train'):
+        assert mode in ['train', 'valid', 'test', 'predict'], 'mode is one of train, valid ,test, predict.'
+        self.cache_path = cache_path
+        self.mode = mode
+        self.data = torch.load(cache_path, map_location='cpu')
+
+    def __getitem__(self, index):
+        item = self.data[index]
+        if self.mode == 'predict':
+            return item['points'], item['labels'], item['edge_index'], item['trace_id'], item['coordinates']
+        return item['points'], item['labels'], item['edge_index'], item['trace_id']
+
+    def __len__(self):
+        return len(self.data)
+
+    def __str__(self):
+        return (
+            f"CachedGraphDataset(\n"
+            f"  Cache: {self.cache_path}\n"
+            f"  Mode: {self.mode}\n"
+            f"  Samples: {len(self.data)}\n"
             f")"
         )
     

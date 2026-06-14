@@ -8,6 +8,21 @@ import glob
 import os
 import torch
 import torch.nn as nn
+def get_default_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+def to_edge_index(graph, device):
+    graph = graph.clone().detach().squeeze(0)
+    if graph.dim() == 2 and graph.shape[0] == 2:
+        return graph.to(torch.long).to(device)
+    graph = graph.to(torch.float32).to(device)
+    rows, cols = torch.nonzero(graph, as_tuple=True)
+    return torch.stack([rows, cols]).to(device)
+
 class WarmupCosineLR(torch.optim.lr_scheduler._LRScheduler):
     def __init__(self, optimizer, warmup_start_lr, end_lr, warmup_epochs, total_epochs, last_epoch=-1):
         self.warmup_epochs = warmup_epochs
