@@ -1,0 +1,29 @@
+/* CSS Document */
+.custom-graticule 
+{
+	position: absolute;
+	height: 1.5%;
+	background-color: transparent;
+	z-index: 1004;
+	box-sizing: border-box;
+}
+.custom-graticule-tick {
+	position: relative;
+	display: inline-block;
+	background-color: transparent;
+	border-right: 1.5px solid #fff;
+	height: 100%;
+	box-sizing: border-box;
+}
+.custom-graticule-label {
+	display: inline-block;
+	position: relative; /* 绝对定位标签 */
+	right: -100%; /* 可视情况调整，让标签更好地对齐刻度线 */
+	transform: translateX(-50%);
+	color: #000;
+	vertical-align: top;
+	z-index: 1005;
+	top: 105%;
+	box-sizing: border-box;
+}
+

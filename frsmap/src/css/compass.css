@@ -1,0 +1,31 @@
+/* CSS Document */
+.compass-container {
+	display: flex;
+	position: absolute;
+	background-color: #fff;
+	width: 8%; /* 调整图标宽度 */
+	aspect-ratio: 1 / 1; /* 宽高比为1:1，即正方形 */
+	top: 10%;
+	right: 0px;
+	z-index: 1005; /* 确保指南针图标位于其他元素之上 */
+	align-items: center; /* 这一行用于垂直居中网格项 */
+	justify-content: center;
+	cursor: move;
+    user-select: none;
+}
+
+.compass-icon {
+	/* 指南针图标样式 */
+	width: 90%; height: 90%;
+	fill: #000;
+	overflow: hidden;
+}
+.compass-container.ui-draggable.ui-resizable {
+    cursor: move; /* 当鼠标悬停在可拖动元素上时，显示移动光标 */
+}
+
+/* 鼠标放在可缩放区域时的光标样式 */
+.ui-resizable-se {
+    background: transparent !important; /* 使手柄背景透明 */
+    border: none !important; /* 如果手柄有边框，也需要取消边框 */
+}

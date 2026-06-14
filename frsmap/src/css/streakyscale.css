@@ -1,0 +1,28 @@
+/* CSS Document */
+.custom-scale-streaky 
+{
+	position: absolute;
+	bottom: 15%;
+	margin: 0 auto;
+	height: 0.8%;
+	background-color: transparent;
+	padding: 0px;
+	z-index: 1004;
+	left: 0px;
+}
+.custom-scale-tick-streaky  {
+	position: relative;
+	display: inline-block;
+	background-color: transparent;
+	margin-right: 0px;
+	height: 100%;
+}
+.custom-scale-label-streaky  {
+	display: inline-block;
+	position: relative; /* 绝对定位标签 */
+	right: -100%; /* 可视情况调整，让标签更好地对齐刻度线 */
+	transform: translateX(-50%);
+	vertical-align: top;
+	top:105%;
+	color: #fff;
+}

@@ -1,0 +1,83 @@
+/* CSS Document */
+.legend-container {
+	position: absolute;
+	bottom: 0px;
+	right: 0px;
+	width: 15%;
+	z-index: 1003; /* 确保图例位于其他元素之上 */
+	background-color: #fff; /* 设置背景颜色 */
+	border: 1px solid #000; /* 添加边框 */
+	padding: 0; /* 内边距，增加空间 */
+	border-radius: 0px; /* 边框圆角 */
+	padding-top: 4vh; /* 增加顶部内边距以容纳标题 */
+	overflow: hidden;
+	//padding-bottom: 5%; /* 增加顶部内边距以容纳标题 */
+}
+/* 为图例标题添加样式 */
+.legend-title {
+	position: absolute;
+	top: 5%; /* 根据实际情况调整 */
+	left: 50%;
+	transform: translateX(-50%); /* 居中对齐 */
+	font-weight: bold;
+	text-align: center;
+	font-size: 150%; /* 设置字号大小，此处以16像素为例 */
+	font-family: 'Times New Roman', Times, serif; 
+}
+.legend-color-block {
+	position: relative;
+	font-family: 'Times New Roman', Times, serif;
+	width: 40%;
+	height: 80%;
+	margin: 0 auto;
+}
+/* 新增窄长方形（线条）样式 */
+.legend-line-block {
+	position: relative;
+	font-family: 'Times New Roman', Times, serif;
+	width: 60%;
+	height: 15%;
+	margin: 0 auto;
+	background-color: #000; /* 这里是线条的颜色，可以根据需要更改 */
+}
+/* 新增圆形样式 */
+.legend-circle-block {
+	position: relative;
+	font-family: 'Times New Roman', Times, serif;
+	aspect-ratio: 1 / 1; /* 宽高比为1:1，即正方形 */
+	height: 50%;
+	border-radius: 50%; /* 使矩形变成圆形 */
+	background-color: #000; /* 示例颜色，可以根据需要更改 */
+	margin: 0 auto;
+}
+.legend-item {
+	/* 文本样式 */
+	display: grid;
+	grid-template-columns: repeat(2, minmax(auto, 1fr)); /* 创建两列布局，自动适应内容宽度 */
+	gap: 10%; /* 在两列之间添加间隔 */
+	align-items: center; /* 这一行用于垂直居中网格项 */
+	font-size: 120%;
+	font-family: 'Times New Roman', Times, serif;
+	color: #000;
+	text-align: left;
+	/* 布局样式 */
+	margin-bottom: 4%; /* 每个图例项之间的间距 */
+	padding: 0px; /* 内部填充，增加空白区域 */
+	border: 0px solid #ccc; /* 图例项边框 */
+	border-radius: 0px; /* 边框圆角 */
+	/* 图片或SVG图例样式 */
+	& > img, & > svg {
+		height: 13px;
+		width: 13px;
+		margin-right: 5px; /* 图片与文本之间的间距 */
+	}
+}
+.legend-container.ui-draggable.ui-resizable {
+    cursor: move; /* 当鼠标悬停在可拖动元素上时，显示移动光标 */
+}
+
+/* 鼠标放在可缩放区域时的光标样式 */
+.ui-resizable-se {
+    background: transparent !important; /* 使手柄背景透明 */
+    border: none !important; /* 如果手柄有边框，也需要取消边框 */
+}

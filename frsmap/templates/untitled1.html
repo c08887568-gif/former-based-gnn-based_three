@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Field Road Segmentation Visualization</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<style type="text/css">
+			.compass-icon {
+			   width: 100%; height: 100%;
+			   fill: #000;
+			   overflow: hidden;
+			}
+			.container {
+				width: 50px;
+				height: 50px;
+				border: 2px solid #000;
+			}
+		</style>
+	</head>
+	<body id="main">
+		<script src="https://at.alicdn.com/t/c/font_4532845_fth6i4fxv4g.js"></script>
+		<div class='container' >
+		
+		</div>
+		<script>
+		var svgElement = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+svgElement.setAttribute("class", "compass-icon");
+svgElement.setAttribute("aria-hidden", "true");
+
+// 创建 <use> 元素
+var useElement = document.createElementNS("http://www.w3.org/2000/svg", "use");
+useElement.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", "#icon-zhibeizhen2");
+
+// 将 <use> 元素添加到 <svg> 元素中
+svgElement.appendChild(useElement);
+
+// 将创建的 <svg> 元素添加到文档中的某个节点中
+document.body.appendChild(svgElement); // 这里假设你想将其添加到 body 元素中
+			</script>
+	</body>
+</html>

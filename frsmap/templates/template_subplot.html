@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Field Road Segmentation Visualization</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+		<link rel="stylesheet" href="https://code.jquery.com/ui/1.13.0/themes/base/jquery-ui.css">
+		<link rel="stylesheet" href="../src/css/base.css" />
+		<link rel="stylesheet" href="../src/css/legend.css" />
+		<link rel="stylesheet" href="../src/css/compass.css" />
+		<link rel="stylesheet" href="../src/css/linescale.css" />
+		<link rel="stylesheet" href="../src/css/streakyscale.css" />
+		<link rel="stylesheet" href="../src/css/header.css" />
+		<link rel="stylesheet" href="../src/css/graticule.css">
+		<style>
+			html, body {
+				margin: 0;	
+				padding: 0;
+				width: 1200px;
+				height: 800px;
+				font-size: 12px;
+			}
+			.figure-container {
+				position: absolute;
+				left: 10px;
+  				display: grid;
+				/* 默认设置，小屏幕设备或窄窗口时，使用 auto-fit 自动适应列数 */
+			   	grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+				//grid-auto-rows: minmax(100px, auto); /* 可选，设置行的最小高度 */
+				grid-gap: 10px; /* 列与列、行与行之间的间距 */
+				padding: 0; /* 如果需要在容器内留白 */
+				max-height: 1000px;
+				max-width: 1200px;
+				border: 0px solid #000; /* 添加灰色边框 */
+				background-color: #fff;
+			}
+			.ax-container{
+				position: relative;
+				margin: 0 auto; /* 居中显示 */
+				max-width: 100%; /* 设置最大宽度为父元素的80% */
+				max-height: 100%;
+				border: 0px solid #000; /* 添加灰色边框 */
+				padding: 0em; /* 内边距 */
+				background-color: #000; /* 背景颜色 */
+				display: flex;
+				flex-direction: column;
+			}
+			.map-container{
+				position: relative;
+				height: 315px; /* 设置最大宽度为父元素的80% */
+				width: 420px;
+				border: 2px solid #000; /* 添加灰色边框 */
+				padding: 0em; /* 内边距 */
+				background-color: #fff; /* 背景颜色 */
+			}
+			.map {
+				position: absolute;
+				top: 0px;
+				height: 300px;
+				width: 400px;
+				font-size: 12px;
+				border: 0px solid #000; /* 添加灰色边框 */
+			}
+			/* leaflet比例尺样式 */
+			.leaflet-control-scale {
+				position: absolute;
+				bottom: 10%;
+				height: 10%;
+				left: 10%;
+				border-radius: 0px;
+				padding: 10%;
+				font-family: Arial, sans-serif;
+				font-size: 5%;
+				color: #000;
+				z-index: 1000; /* 确保比例尺控件位于其他元素之上 */
+				background-color: transparent;
+			}
+			.leaflet-control-scale-line {
+				border-color: transparent;
+				height: 10px;
+				background-color: transparent; /* 设置比例尺线背景为透明 */
+				color: transparent; /* 设置比例尺文本颜色为透明 */
+			}
+		</style>
+	</head>
+	<body id="main">
+		<div id='figure' class="figure-container">
+		</div>
+		<!-- 引入 Leaflet JavaScript 库 --> 
+		<script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script> 
+		<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+		<script src="https://code.jquery.com/ui/1.13.0/jquery-ui.min.js"></script>	
+		<script src="../src/createax.js"></script>
+		<script src="../src/createmap.js"></script>
+		<script src="../src/createscale.js"></script>
+		<script src="../src/createheader.js"></script>
+		<script src="../src/createcompass.js"></script>
+		<script src="../src/createtitle.js"></script>
+		<script src="../src/scale.js"></script>
+		<script src="../src/adjust.js"></script>
+		<script src="../src/plugs.js"></script>
+		<script src="../src/createlegend.js"></script>
+		<script src="../src/scatter.js"></script>
+		<script src="../src/graticule.js"></script>
+		<script src="../geojson_data/wheat_1_harvestor_15.js"></script>
+		<script src="../geojson_data/wheat_1_harvestor_17.js"></script>
+		<script src="../geojson_data/wheat_1_harvestor_24.js"></script>
+		<script src="../geojson_data/wheat_1_harvestor_29.js"></script>
+		<script>
+			document.body.style.overflow = 'hidden';
+			// 创建 Leaflet 地图对象并设置中心点和缩放级别
+			url="https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/{z}/{x}/{y}?access_token=YOUR_MAPBOX_ACCESS_TOKEN";
+			scaletype="streaky";
+			createax('figure','ax1','#fff','0','#000')
+			var map1=createmap('ax1','map1-container',"map1",[34.919378, 118.987609],14,url,20);
+			
+			createscale("map1",map1,scaletype,"map1-scale-container")
+			
+			addgraticule('map1-container',map1,"map1-bottom-graticule","map1-top-graticule","map1-left-graticule",
+						 "map1-right-graticule",5,400,15);
+			
+			createheader('ax1','header1','Map 1')
+			createtitle('ax1','Titile');
+			createax('figure','ax2','#fff','0','#000')
+			
+			var map2=createmap('ax2','map2-container',"map2",[34.282662, 117.899288],14,url,20);
+			
+			createscale("map2",map2,scaletype,"map2-scale-container")
+			
+			addgraticule('map2-container',map2,"map2-bottom-graticule","map2-top-graticule","map2-left-graticule",
+						 "map2-right-graticule",5,400,15);
+			
+			createheader('ax2','header2','Map 2')
+			createtitle('ax2','Titile');
+			
+			createax('figure','ax3','#fff','0','#000')
+			var map3=createmap('ax3','map3-container',"map3",[34.490087, 118.95703],14,url,20);
+			
+			createscale("map3",map3,scaletype,"map3-scale-container")
+			
+			addgraticule('map3-container',map3,"map3-bottom-graticule","map3-top-graticule","map3-left-graticule",
+						 "map3-right-graticule",5,400,15);
+			
+			createheader('ax3','header3','Map 3')
+			createtitle('ax3','Titile');
+			
+			createax('figure','ax4','#fff','0','#000')
+			var map4=createmap('ax4','map4-container',"map4",[34.662311, 118.919143],14,url,20);
+			
+			createscale("map4",map4,scaletype,"map4-scale-container")
+			
+			addgraticule('map4-container',map4,"map4-bottom-graticule","map4-top-graticule","map4-left-graticule",
+						 "map4-right-graticule",5,400,15);
+			
+			createheader('ax4','header4','Map 4')
+			createtitle('ax4','Titile');
+			map1.whenReady(() => {
+				var data1=get_wheat_1_harvestor_15_Data();
+				geoscatter(map1,data1,"darkseagreen","lightblue",0.5);
+			});
+			map2.whenReady(() => {
+				var data2=get_wheat_1_harvestor_17_Data();
+				geoscatter(map2,data2,"darkseagreen","lightblue",0.5);
+			});
+			map3.whenReady(() => {
+				var data3=get_wheat_1_harvestor_24_Data();
+				geoscatter(map3,data3,"darkseagreen","lightblue",0.5);
+			});
+			map4.whenReady(() => {
+				var data4=get_wheat_1_harvestor_29_Data();
+				geoscatter(map4,data4,"darkseagreen","lightblue",0.5);
+			});
+			createtitle('main','Titile');
+			createlegend('main','legend-top')
+			createlegenditem('legend-top','line','Road','lightblue','black');
+			createlegenditem('legend-top','block','Field','darkseagreen','black');
+			createlegenditem('legend-top','point','Field Point','darkseagreen','black');
+			createlegenditem('legend-top','point','Road Point','lightblue','black');
+			legendinitialize("legend-top",500,200,200,160,'#fff','black','1');
+			
+			createcompass('main',"compass-top");
+			compassinitialize("compass-top",1,500,50,50,'transparent','black','1');
+			
+			legenddraggable("legend-top");
+			compassdraggable("compass-top");
+			legendresizable("legend-top");
+			compassresizable("compass-top");
+		</script>
+	</body>
+</html>

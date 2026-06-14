@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Field Road Segmentation Visualization</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+		<link rel="stylesheet" href="https://code.jquery.com/ui/1.13.0/themes/base/jquery-ui.css" />
+		<link rel="stylesheet" href="../src/css/legend.css" />
+		<link rel="stylesheet" href="../src/css/compass.css" />
+		<link rel="stylesheet" href="../src/css/linescale.css" />
+		<link rel="stylesheet" href="../src/css/streakyscale.css" />
+		<link rel="stylesheet" href="../src/css/header.css" />
+		<link rel="stylesheet" href="../src/css/graticule.css" />
+		<style>
+			body {
+				position: absolute;
+				width: {{body.style.width}}px;
+				height: {{body.style.height}}px;
+				padding: {{body.style.padding}}px;
+				background-color: {{body.style.backgroundColor}};
+				border: {{body.style.border}};
+			}
+			.figure-container {
+				position: absolute;
+				left: {{figure.style.left}}px;
+				bottom: {{figure.style.bottom}}px;
+  				display: grid;
+				/* 默认设置，小屏幕设备或窄窗口时，使用 auto-fit 自动适应列数 */
+			   	grid-template-columns: repeat(auto-fit, minmax({{figure.map_Container.style.width}}px, 1fr));
+				//grid-auto-rows: minmax(100px, auto); /* 可选，设置行的最小高度 */
+				grid-column-gap: {{figure.style.grid_column_gap}}px; /* 设置水平间距 */
+  				grid-row-gap: {{figure.style.grid_row_gap}}px; /* 设置垂直间距 */
+				padding: {{figure.style.padding}}; /* 如果需要在容器内留白 */
+				max-height: {{figure.style.max_height}}px;
+				max-width: {{figure.style.max_width}}px;
+				border: 0px solid #000; /* 添加灰色边框 */
+				background-color: #fff;
+			}
+			.ax-container{
+				position: relative;
+				margin: 0 auto; /* 居中显示 */
+				max-width: 100%; /* 设置最大宽度为父元素的80% */
+				max-height: 100%;
+				border: 0px solid #000; /* 添加灰色边框 */
+				padding: 0em; /* 内边距 */
+				background-color: #000; /* 背景颜色 */
+				display: flex;
+				flex-direction: column;
+			}
+			.map-container{
+				position: relative;
+				height: {{figure.map_Container.style.height}}px; /* 设置最大宽度为父元素的80% */
+				width: {{figure.map_Container.style.width}}px;
+				border-bottom: {{figure.map_Container.style.border}}; /* 添加灰色边框 */
+				border-top: {{figure.map_Container.style.border}}; /* 添加灰色边框 */
+				padding: 0em; /* 内边距 */
+				background-color: {{figure.map_Container.style.backgroundColor}}; /* 背景颜色 */
+			}
+			.map {
+				position: absolute;
+				top: 0px;
+				height: {{figure.geomap.style.height}}px;
+				width: {{figure.geomap.style.width}}px;
+				border: {{figure.geomap.style.border}}; /* 添加灰色边框 */
+				box-sizing: border-box;
+			}
+			.blank-container {
+				position: relative;
+				margin: 0 auto; /* 居中显示 */
+				height: {{figure.map_Container.style.height}}px; /* 设置最大宽度为父元素的80% */
+				width: {{figure.map_Container.style.width}}px;
+				background-color: transparent; /* 背景颜色 */
+			}
+			/* leaflet比例尺样式 */
+			.leaflet-control-scale {
+				position: absolute;
+				bottom: 10%;
+				height: 10%;
+				left: 10%;
+				border-radius: 0px;
+				padding: 10%;
+				font-family: Arial, sans-serif;
+				font-size: 5%;
+				color: #000;
+				z-index: 1000; /* 确保比例尺控件位于其他元素之上 */
+				background-color: transparent;
+			}
+			.leaflet-control-scale-line {
+				border-color: transparent;
+				height: 10px;
+				background-color: transparent; /* 设置比例尺线背景为透明 */
+				color: transparent; /* 设置比例尺文本颜色为透明 */
+			}
+		</style>
+	</head>
+	<body id="main">
+		<div id='figure' class="figure-container">
+		</div>
+		<!-- 引入 Leaflet JavaScript 库 --> 
+		<script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script> 
+		<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+		<script src="https://code.jquery.com/ui/1.13.0/jquery-ui.min.js"></script>	
+		<script src="https://at.alicdn.com/t/c/font_4532845_aj5axsl5f6.js"></script>
+		<script src="../src/createax.js"></script>
+		<script src="../src/createmap.js"></script>
+		<script src="../src/createscale.js"></script>
+		<script src="../src/createheader.js"></script>
+		<script src="../src/createcompass.js"></script>
+		<script src="../src/createtitle.js"></script>
+		<script src="../src/createblank.js"></script>
+		<script src="../src/scale.js"></script>
+		<script src="../src/adjust.js"></script>
+		<script src="../src/plugs.js"></script>
+		<script src="../src/createlegend.js"></script>
+		<script src="../src/scatter.js"></script>
+		<script src="../src/graticule.js"></script>
+		<script>
+			document.body.style.overflow = 'hidden';
+			// 创建 Leaflet 地图对象并设置中心点和缩放级别
+			{% for ax in axes -%}
+			{% if ax is not none -%}
+			createax('figure','{{ax.lid}}','{{ax.style.backgroundColor}}',{{ax.style.edgeSize}},'{{ax.style.edgeColor}}')
+			var {{ax.geomap.lid}}=createmap('{{ax.lid}}','{{ax.geomap.lid}}-container',"{{ax.geomap.lid}}",
+				 {{ax.geomap.center}},{{ax.geomap.zoomlevel}},'{{ax.geomap.url}}',{{ax.geomap.maxzoom}});
+			{% if ax.scale is not none -%}
+			createscale("{{ax.geomap.lid}}",{{ax.geomap.lid}},'{{ax.scale.ltype}}',"{{ax.geomap.lid}}-scale-container",
+				 {{ax.scale.ratio}},{{ax.scale.left}},{{ax.scale.bottom}},{{ax.scale.numticks}},{{ax.scale.labellist}},{{ax.scale.borderratio}})
+			{%- endif %}
+			{% if ax.compass is not none -%}
+			createcompass('{{ax.geomap.lid}}',"{{ax.compass.lid}}",{{ax.compass.icon.ltype}});
+			compassinitialize("{{ax.compass.lid}}",{{ax.compass.style.left}},
+							  {{ax.compass.style.bottom}},{{ax.compass.style.size}},
+							  '{{ax.compass.style.backgroundColor}}','{{ax.compass.style.edgeColor}}',
+							  {{ax.compass.style.edgeSize}});
+			{%- endif %}
+			{% if ax.graticule is not none -%}
+			addgraticule('{{ax.geomap.lid}}-container','{{ax.geomap.lid}}',{{ax.geomap.lid}},"{{ax.geomap.lid}}-bottom-graticule",
+				 "{{ax.geomap.lid}}-top-graticule","{{ax.geomap.lid}}-left-graticule",
+				 "{{ax.geomap.lid}}-right-graticule",{{ax.graticule.numticks}},{{figure.geomap.style.width}},
+				 {{figure.map_Container.style.height-figure.geomap.style.height}},{{ax.graticule.ratio}});
+			{%- endif %}
+			{% if ax.scatter is not none -%}
+			{{ax.geomap.lid}}.whenReady(() => {
+				var data={{ax.scatter.data}};
+				geoscatter({{ax.geomap.lid}},data,{{ax.scatter.colormap | tojson }},{{ax.scatter.size}});
+			});
+			{%- endif %}
+			{% if ax.header is not none -%}
+			createheader('{{ax.lid}}','{{ax.header.textContent}}',{{ax.header.style.fontSize}},
+				 '{{ax.header.style.fontFamily}}','{{ax.header.style.fontColor}}',
+				 '{{ax.header.style.backgroundColor}}');
+			{%- endif %}
+			{% if ax.title is not none -%}
+			createtitle('{{ax.lid}}','{{ax.title.textContent}}',{{ax.title.style.fontSize}},
+					'{{ax.title.style.fontFamily}}','{{ax.title.style.fontColor}}',
+				   '{{ax.title.style.backgroundColor}}');
+			{%- endif %}
+			{%- else -%}
+			createblank('figure');
+			{%- endif %}
+			{% endfor -%}
+			
+			
+			
+			{% if body.title is not none -%}
+			createtitle('{{body.lid}}','{{body.title.textContent}}',{{body.title.style.fontSize}},
+						'{{body.title.style.fontFamily}}','{{body.title.style.fontColor}}',
+					   '{{body.title.style.backgroundColor}}');
+			{%- endif %}
+			{% if body.legend is not none -%}
+			createlegend('{{body.lid}}','{{body.legend.lid}}','{{body.legend.title.textContent}}',
+						 "{{body.legend.style.fontFamily}}");
+			{% for item in body.legend.legenditems -%}
+    		createlegenditem('{{body.legend.lid}}', '{{ item.icon.ltype }}', '{{ item.span.textContent }}', 
+							 '{{ item.icon.style.backgroundColor }}', '{{ item.span.style.color }}');
+			{% endfor -%}
+			legendinitialize("{{body.legend.lid}}",{{body.legend.style.left}},{{body.legend.style.bottom}},
+							 {{body.legend.style.width}},{{body.legend.style.height}},
+							 '{{body.legend.style.backgroundColor}}','{{body.legend.style.edgeColor}}',
+							 '{{body.legend.style.edgeSize}}');
+			{% if body.legend.draggable is true -%}
+			legenddraggable("{{body.legend.lid}}");
+			{%- endif %}
+			{% if body.legend.resizable is true -%}
+			legendresizable("{{body.legend.lid}}");
+			{%- endif %}
+			
+			{%- endif %}
+			{% if body.compass is not none -%}
+			createcompass('{{body.lid}}',"{{body.compass.lid}}",{{body.compass.icon.ltype}});
+			compassinitialize("{{body.compass.lid}}",{{body.compass.style.left}},
+							  {{body.compass.style.bottom}},{{body.compass.style.size}},
+							  '{{body.compass.style.backgroundColor}}','{{body.compass.style.edgeColor}}',
+							  {{body.compass.style.edgeSize}});
+			{% if body.compass.draggable is true -%}
+			compassdraggable("{{body.compass.lid}}");
+			{%- endif %}
+			{% if body.compass.resizable is true -%}
+			compassresizable("{{body.compass.lid}}");
+			{%- endif %}
+			{%- endif %}
+			
+			
+			
+		</script>
+	</body>
+</html>

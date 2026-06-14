@@ -1,0 +1,30 @@
+/* CSS Document */
+.custom-scale-line
+{
+	position: absolute;
+	bottom: 15%;
+	margin: 0 auto;
+	height: 2%;
+	background-color: transparent;
+	padding: 0px;
+	font-size: 50%;
+	z-index: 1004;
+	left: 0px;
+}
+.custom-scale-tick-line {
+	position: relative;
+	display: inline-block;
+	background-color: transparent;
+	top: 30%;
+	margin-right: 0px;
+	height: 70%;
+}
+.custom-scale-label-line {
+	display: inline-block;
+	position: relative; /* 绝对定位标签 */
+	right: -100%; /* 可视情况调整，让标签更好地对齐刻度线 */
+	transform: translateX(-50%);
+	color: #fff;
+	vertical-align: top;
+	top:105%;
+}
