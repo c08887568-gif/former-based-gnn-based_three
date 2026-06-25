@@ -147,8 +147,10 @@ class Pretrain_Parallel(nn.Module):
                  num_heads=6, mlp_ratio=4.,qkv_bias=True, use_DropKey=True,drop_rate=0., attn_drop_rate=0., drop_path_rate=0., 
                  embed_layer=None, norm_layer=None, act_layer=None, 
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 norm_pix_loss=False):
+                 norm_pix_loss=False, pretrain_mode="current", num_edge_types=4):
         super().__init__()
+        self.pretrain_mode = pretrain_mode
+        self.num_edge_types = num_edge_types
         self.encoder = VIT_GIN_Parallel(
             img_size=img_size,
             patch_size=patch_size, 
@@ -162,7 +164,9 @@ class Pretrain_Parallel(nn.Module):
             use_DropKey=use_DropKey,
             drop_rate=drop_rate, 
             attn_drop_rate=attn_drop_rate, 
-            drop_path_rate=drop_path_rate
+            drop_path_rate=drop_path_rate,
+            pretrain_mode=pretrain_mode,
+            num_edge_types=num_edge_types
         )
         self.norm_pix_loss = norm_pix_loss
         self.decoder = TransformerDecoder(
@@ -219,6 +223,10 @@ class Pretrain_Parallel(nn.Module):
         pred_image = self.decoder.forward_image(latent_image, ids_restore_image)
         loss = self.forward_loss(x, pred_image, pred_graph, mask_image,mask_graph,loss_config)
         return loss
+    def get_pretrain_edge_statistics(self):
+        if hasattr(self.encoder, "get_pretrain_edge_statistics"):
+            return self.encoder.get_pretrain_edge_statistics()
+        return {}
     def train_step(self,data,mask_ratio_image,mask_ratio_graph,optimizer,loss_config):
         # 模型训练步骤
         optimizer.zero_grad()  # 清除之前的梯度

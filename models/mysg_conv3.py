@@ -1,5 +1,6 @@
 from typing import Optional
 import torch
+import torch.nn as nn
 
 from torch import Tensor
 
@@ -184,3 +185,103 @@ class SGConv(MessagePassing):
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.in_channels}, '
                 f'{self.out_channels}, K={self.K})')
+
+
+class EdgeWeightLearner(nn.Module):
+    def __init__(self, in_channels: int, hidden_channels: Optional[int] = None):
+        super().__init__()
+        hidden_channels = hidden_channels or max(16, min(128, in_channels))
+        self.mlp = nn.Sequential(
+            nn.Linear(in_channels * 3, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, 1),
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for module in self.mlp:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                nn.init.zeros_(module.bias)
+        # Keep the initial gate close to normal propagation.
+        nn.init.constant_(self.mlp[-1].bias, 4.0)
+
+    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        src, dst = edge_index[0].long(), edge_index[1].long()
+        edge_feature = torch.cat([x[src], x[dst], torch.abs(x[src] - x[dst])], dim=-1)
+        return torch.sigmoid(self.mlp(edge_feature)).view(-1)
+
+
+class EdgeTypeWeightLearner(nn.Module):
+    def __init__(self, in_channels: int, num_edge_types: int = 4, hidden_channels: Optional[int] = None):
+        super().__init__()
+        self.num_edge_types = num_edge_types
+        hidden_channels = hidden_channels or max(16, min(128, in_channels))
+        feature_channels = in_channels * 3
+        self.type_mlp = nn.Sequential(
+            nn.Linear(feature_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, num_edge_types),
+        )
+        self.weight_mlp = nn.Sequential(
+            nn.Linear(feature_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, 1),
+        )
+        self.type_weight = nn.Parameter(torch.full((num_edge_types,), 4.0))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for module in list(self.type_mlp) + list(self.weight_mlp):
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                nn.init.zeros_(module.bias)
+        nn.init.constant_(self.weight_mlp[-1].bias, 4.0)
+        nn.init.constant_(self.type_weight, 4.0)
+
+    def forward(self, x: Tensor, edge_index: Tensor):
+        src, dst = edge_index[0].long(), edge_index[1].long()
+        edge_feature = torch.cat([x[src], x[dst], torch.abs(x[src] - x[dst])], dim=-1)
+        edge_type_prob = F.softmax(self.type_mlp(edge_feature), dim=-1)
+        type_weighted_score = (edge_type_prob * torch.sigmoid(self.type_weight).view(1, -1)).sum(dim=-1)
+        edge_gate = torch.sigmoid(self.weight_mlp(edge_feature)).view(-1)
+        final_edge_weight = edge_gate * type_weighted_score
+        return final_edge_weight, edge_type_prob
+
+
+class SGConvEdgeWeightPretrain(SGConv):
+    def __init__(self, in_channels: int, out_channels: int, is_attn: bool = False, K: int = 3,
+                 bias: bool = True, normalize: bool = True, **kwargs):
+        super().__init__(in_channels, out_channels, is_attn=False, K=K, bias=bias, normalize=normalize, **kwargs)
+        self.edge_weight_learner = EdgeWeightLearner(in_channels)
+        self.last_edge_weight = None
+        self.last_edge_type_prob = None
+
+    def forward(self, x: Tensor, edge_index: Adj, edge_weight: OptTensor = None) -> Tensor:
+        if not isinstance(edge_index, Tensor):
+            raise TypeError("SGConvEdgeWeightPretrain requires dense Tensor edge_index.")
+        learned_edge_weight = self.edge_weight_learner(x, edge_index)
+        if edge_weight is not None:
+            learned_edge_weight = learned_edge_weight * edge_weight.to(learned_edge_weight.device)
+        self.last_edge_weight = learned_edge_weight.detach()
+        self.last_edge_type_prob = None
+        return super().forward(x, edge_index, learned_edge_weight)
+
+
+class SGConvEdgeTypeWeightPretrain(SGConv):
+    def __init__(self, in_channels: int, out_channels: int, is_attn: bool = False, K: int = 3,
+                 bias: bool = True, normalize: bool = True, num_edge_types: int = 4, **kwargs):
+        super().__init__(in_channels, out_channels, is_attn=False, K=K, bias=bias, normalize=normalize, **kwargs)
+        self.edge_type_weight_learner = EdgeTypeWeightLearner(in_channels, num_edge_types=num_edge_types)
+        self.last_edge_weight = None
+        self.last_edge_type_prob = None
+
+    def forward(self, x: Tensor, edge_index: Adj, edge_weight: OptTensor = None) -> Tensor:
+        if not isinstance(edge_index, Tensor):
+            raise TypeError("SGConvEdgeTypeWeightPretrain requires dense Tensor edge_index.")
+        learned_edge_weight, edge_type_prob = self.edge_type_weight_learner(x, edge_index)
+        if edge_weight is not None:
+            learned_edge_weight = learned_edge_weight * edge_weight.to(learned_edge_weight.device)
+        self.last_edge_weight = learned_edge_weight.detach()
+        self.last_edge_type_prob = edge_type_prob.detach()
+        return super().forward(x, edge_index, learned_edge_weight)

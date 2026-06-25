@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # from mysg_conv3 import SGConv
-from .mysg_conv3 import SGConv
+from .mysg_conv3 import SGConv, SGConvEdgeTypeWeightPretrain, SGConvEdgeWeightPretrain
 from torch_geometric.nn import global_mean_pool
 from collections import OrderedDict
 from einops import rearrange
@@ -12,10 +12,13 @@ from sklearn.metrics import precision_score, recall_score, f1_score, classificat
 from thop import profile
 import numpy as np
 class GIN(nn.Module):
-    def __init__(self, num_features, embed_dim,num_classes,drop_rate,pretrained_path=None):
+    def __init__(self, num_features, embed_dim,num_classes,drop_rate,pretrained_path=None,
+                 pretrain_mode="current", num_edge_types=4):
         super(GIN, self).__init__()
         self.embed_dim = embed_dim
         self.num_features = num_features
+        self.pretrain_mode = pretrain_mode
+        self.num_edge_types = num_edge_types
         # self.conv1 = GINConv(nn.Sequential(
         #     nn.Linear(num_features, embed_dim),
         #     nn.ReLU(),
@@ -31,13 +34,21 @@ class GIN(nn.Module):
 
         # self.conv1 = SGConv(num_features,embed_dim,is_adaptation=True)
         # self.conv2 = SGConv(embed_dim,embed_dim,is_adaptation=False)
-        self.conv1 = SGConv(num_features,embed_dim,is_attn=True)
-        self.conv2 = SGConv(embed_dim,embed_dim,is_attn=False)
+        if pretrain_mode == "edge_weight":
+            self.conv1 = SGConvEdgeWeightPretrain(num_features,embed_dim,is_attn=False)
+            self.conv2 = SGConvEdgeWeightPretrain(embed_dim,embed_dim,is_attn=False)
+        elif pretrain_mode == "edge_type_weight":
+            self.conv1 = SGConvEdgeTypeWeightPretrain(num_features,embed_dim,is_attn=False,num_edge_types=num_edge_types)
+            self.conv2 = SGConvEdgeTypeWeightPretrain(embed_dim,embed_dim,is_attn=False,num_edge_types=num_edge_types)
+        else:
+            self.conv1 = SGConv(num_features,embed_dim,is_attn=True)
+            self.conv2 = SGConv(embed_dim,embed_dim,is_attn=False)
         # self.conv1 = SGConv(num_features,embed_dim)
         # self.conv2 = SGConv(embed_dim,embed_dim)
         self.drop = nn.Dropout(drop_rate)
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
         self.apply(self._init_weights)
+        self.reset_pretrain_edge_learners()
         if pretrained_path is not None:
             self.load_pretrained_encoder(pretrained_path)
     def _init_weights(self, m):
@@ -48,6 +59,14 @@ class GIN(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+    def reset_pretrain_edge_learners(self):
+        for conv in (self.conv1, self.conv2):
+            learner = getattr(conv, "edge_weight_learner", None)
+            if learner is not None and hasattr(learner, "reset_parameters"):
+                learner.reset_parameters()
+            learner = getattr(conv, "edge_type_weight_learner", None)
+            if learner is not None and hasattr(learner, "reset_parameters"):
+                learner.reset_parameters()
     def graph_random_masking(self, x, edge_index,mask_ratio):
         L, D = x.shape
         len_keep = int(L * (1 - mask_ratio))
@@ -75,6 +94,42 @@ class GIN(nn.Module):
         x = F.relu(self.conv2(x, edge_index))
         x = self.drop(x)
         return x,mask,ids_restore
+    def get_pretrain_edge_statistics(self):
+        weights = []
+        probs = []
+        for conv in (self.conv1, self.conv2):
+            edge_weight = getattr(conv, "last_edge_weight", None)
+            edge_type_prob = getattr(conv, "last_edge_type_prob", None)
+            if edge_weight is not None:
+                weights.append(edge_weight.reshape(-1).detach().cpu())
+            if edge_type_prob is not None:
+                probs.append(edge_type_prob.detach().cpu())
+        result = {}
+        if weights:
+            edge_weight = torch.cat(weights)
+            q25, q50, q75 = torch.quantile(edge_weight, torch.tensor([0.25, 0.5, 0.75]))
+            result["edge_weight"] = dict(
+                mean=float(edge_weight.mean().item()),
+                std=float(edge_weight.std(unbiased=False).item()),
+                min=float(edge_weight.min().item()),
+                q25=float(q25.item()),
+                q50=float(q50.item()),
+                q75=float(q75.item()),
+                max=float(edge_weight.max().item()),
+            )
+        if probs:
+            edge_type_prob = torch.cat(probs, dim=0)
+            mean_prob = edge_type_prob.mean(dim=0)
+            entropy = -(edge_type_prob * torch.log(edge_type_prob.clamp_min(1e-12))).sum(dim=1)
+            dominant = edge_type_prob.argmax(dim=1)
+            dominant_ratio = max((dominant == idx).float().mean().item() for idx in range(edge_type_prob.shape[1]))
+            result["edge_type"] = dict(
+                mean_prob=[float(value.item()) for value in mean_prob],
+                entropy_mean=float(entropy.mean().item()),
+                dominant_type_ratio=float(dominant_ratio),
+                type_collapse_flag=bool(dominant_ratio > 0.95),
+            )
+        return result
     def forward(self, data):
         x = data.x
         edge_index = data.edge_index

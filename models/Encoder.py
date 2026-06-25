@@ -15,7 +15,7 @@ class VIT_GIN_Parallel(nn.Module):
     def __init__(self, img_size=43, patch_size=1, in_chans=1, num_classes=2, embed_dim=108, depth=1,
                  num_heads=6, mlp_ratio=4.,qkv_bias=True,use_DropKey=True,
                  drop_rate=0., attn_drop_rate=0.0, drop_path_rate=0.0, embed_layer=None, norm_layer=None,
-                 act_layer=None,pretrained_path=None):
+                 act_layer=None,pretrained_path=None, pretrain_mode="current", num_edge_types=4):
 
         super().__init__()
         self.img_size = img_size
@@ -34,7 +34,14 @@ class VIT_GIN_Parallel(nn.Module):
             attn_drop_rate=attn_drop_rate, 
             drop_path_rate=drop_path_rate, 
         )
-        self.graph = GIN(img_size,embed_dim,0,drop_rate)
+        self.graph = GIN(
+            img_size,
+            embed_dim,
+            0,
+            drop_rate,
+            pretrain_mode=pretrain_mode,
+            num_edge_types=num_edge_types,
+        )
         self.head_image = nn.Linear(embed_dim,num_classes)
         self.image_norm = nn.LayerNorm(embed_dim)
         self.head_graph = nn.Linear(embed_dim,num_classes)
@@ -45,6 +52,10 @@ class VIT_GIN_Parallel(nn.Module):
         x_image,mask_image,ids_restore_image = self.vision.forward_features(x,mask_ratio_image)
         x_graph,mask_graph,ids_restore_graph = self.graph.forward_features(x.squeeze(),edge_index,mask_ratio_graph)
         return x_image,mask_image,ids_restore_image,x_graph,mask_graph,ids_restore_graph
+    def get_pretrain_edge_statistics(self):
+        if hasattr(self.graph, "get_pretrain_edge_statistics"):
+            return self.graph.get_pretrain_edge_statistics()
+        return {}
     def forward(self, data):
         x = data.x.view(-1,1,43,1)
         edge_index = data.edge_index

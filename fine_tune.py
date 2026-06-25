@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import os
 import sys
@@ -13,8 +14,9 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch_geometric.data import Data
+from sklearn.metrics import classification_report
 
-from dataset import GraphDataset
+from dataset import CachedGraphDataset, GraphDataset
 from fieldroaddatapipeline.dataloader import FieldRoadDataLoader
 from models.Encoder import VIT_GIN_Parallel
 from utils.utils import WarmupCosineLR, get_default_device, to_edge_index
@@ -49,6 +51,8 @@ def parse_args():
     parser.add_argument("--run_name", default=None)
     parser.add_argument("--dry_run", type=str2bool, nargs="?", const=True, default=False)
     parser.add_argument("--skip_test", type=str2bool, nargs="?", const=True, default=True)
+    parser.add_argument("--epochs", type=int, default=TOTAL_EPOCHS)
+    parser.add_argument("--cache_dir", default="cache/wheat_non_iid")
     return parser.parse_args()
 
 
@@ -72,7 +76,8 @@ def resolve_config(args, run_name, run_dir):
         run_dir=str(run_dir),
         dry_run=args.dry_run,
         skip_test=args.skip_test,
-        total_epochs=TOTAL_EPOCHS,
+        total_epochs=args.epochs,
+        cache_dir=args.cache_dir,
     )
 
 
@@ -80,6 +85,39 @@ def write_run_metadata(run_dir, config):
     write_json(run_dir / "config_resolved.json", config)
     command = " ".join(sys.argv)
     (run_dir / "command.txt").write_text(command + "\n", encoding="utf-8")
+
+
+def write_csv(path, fieldnames, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def valid_metric_summary(predictions, labels, epoch, valid_loss, valid_acc):
+    labels = np.asarray(labels).reshape(-1)
+    predictions = np.asarray(predictions)
+    if predictions.ndim > 1:
+        predictions = np.argmax(predictions, axis=1)
+    predictions = predictions.reshape(-1)
+    report = classification_report(
+        labels,
+        predictions,
+        labels=[0, 1],
+        target_names=["road", "field"],
+        output_dict=True,
+        zero_division=0,
+    )
+    return dict(
+        best_epoch=epoch,
+        valid_loss=float(valid_loss),
+        valid_accuracy=float(valid_acc),
+        valid_macro_f1=float(report["macro avg"]["f1-score"]),
+        valid_road_f1=float(report["road"]["f1-score"]),
+        valid_field_f1=float(report["field"]["f1-score"]),
+        pred_road_rate=float((predictions == 0).mean()) if len(predictions) else 0.0,
+    )
 
 
 def disabled_pretrain_audit(config):
@@ -241,27 +279,35 @@ def main():
 
     logger = Logger(model_name="VIT_GIN_Parallel", dataset_kind="paddy_small")
     logger.log_environment_info()
-    train_path = dict(
-        gnss="../dataset_5/dataset_high/paddy/sampled_paddy_43",
-        adj="../dataset_5/dataset_high/paddy/sampled_paddy_adj",
-        json="../dataset_5/dataset_high/paddy/Non-Identically_Distributed_Coco/sampled_paddy_43_train.json"
-    )
-    train_dataset = GraphDataset(train_path, mode='train', num_workers=2, max_len=1000, drop_rate=0)
-    valid_path = dict(
-        gnss="../dataset_5/dataset_high/paddy/sampled_paddy_43",
-        adj="../dataset_5/dataset_high/paddy/sampled_paddy_adj",
-        json="../dataset_5/dataset_high/paddy/Non-Identically_Distributed_Coco/sampled_paddy_43_valid.json"
-    )
-    valid_dataset = GraphDataset(valid_path, mode='valid', num_workers=2, max_len=1000, drop_rate=0)
+    cache_dir = Path(config["cache_dir"])
+    if (cache_dir / "train.pt").exists() and (cache_dir / "valid.pt").exists():
+        train_dataset = CachedGraphDataset(cache_dir / "train.pt", mode='train')
+        valid_dataset = CachedGraphDataset(cache_dir / "valid.pt", mode='valid')
+    else:
+        train_path = dict(
+            gnss="../dataset_5/dataset_high/paddy/sampled_paddy_43",
+            adj="../dataset_5/dataset_high/paddy/sampled_paddy_adj",
+            json="../dataset_5/dataset_high/paddy/Non-Identically_Distributed_Coco/sampled_paddy_43_train.json"
+        )
+        train_dataset = GraphDataset(train_path, mode='train', num_workers=2, max_len=1000, drop_rate=0)
+        valid_path = dict(
+            gnss="../dataset_5/dataset_high/paddy/sampled_paddy_43",
+            adj="../dataset_5/dataset_high/paddy/sampled_paddy_adj",
+            json="../dataset_5/dataset_high/paddy/Non-Identically_Distributed_Coco/sampled_paddy_43_valid.json"
+        )
+        valid_dataset = GraphDataset(valid_path, mode='valid', num_workers=2, max_len=1000, drop_rate=0)
     test_dataset = None
     test_loader = None
     if not config["skip_test"]:
-        test_path = dict(
-            gnss="../dataset_5/dataset_high/paddy/sampled_paddy_43",
-            adj="../dataset_5/dataset_high/paddy/sampled_paddy_adj",
-            json="../dataset_5/dataset_high/paddy/Non-Identically_Distributed_Coco/sampled_paddy_43_test.json"
-        )
-        test_dataset = GraphDataset(test_path, mode='test', num_workers=2, max_len=1000, drop_rate=0)
+        if (cache_dir / "test.pt").exists():
+            test_dataset = CachedGraphDataset(cache_dir / "test.pt", mode='test')
+        else:
+            test_path = dict(
+                gnss="../dataset_5/dataset_high/paddy/sampled_paddy_43",
+                adj="../dataset_5/dataset_high/paddy/sampled_paddy_adj",
+                json="../dataset_5/dataset_high/paddy/Non-Identically_Distributed_Coco/sampled_paddy_43_test.json"
+            )
+            test_dataset = GraphDataset(test_path, mode='test', num_workers=2, max_len=1000, drop_rate=0)
     logger.log_dataset_info(train_dataset, valid_dataset, test_dataset)
     # Create data loaders using PyTorch DataLoader
     train_loader = FieldRoadDataLoader(train_dataset, batch_size=1, shuffle=True, drop_last=True)
@@ -270,7 +316,7 @@ def main():
         test_loader = FieldRoadDataLoader(test_dataset, batch_size=1, shuffle=False, drop_last=True)
     ####################################超参数
     #torch.autograd.set_detect_anomaly(True)
-    total_epochs = TOTAL_EPOCHS
+    total_epochs = config["total_epochs"]
     # Set the random seed if needed
     #torch.manual_seed(2023)
     # Initialize your model, optimizer, and LR scheduler
@@ -308,7 +354,7 @@ def main():
     )
     ##########################################训练
     best_train_acc = 0.0
-    best_valid_acc = 0.0
+    best_valid_acc = -1.0
     total_train_time = 0
     total_valid_time = 0
     total_test_time = 0
@@ -322,6 +368,8 @@ def main():
     class_result_test_valid = None
     final_test_train = False
     final_test_valid = False
+    train_log_rows = []
+    best_valid_metrics = None
     for pass_num in range(total_epochs):
         model.train()
         epoch_start_time = time.time()
@@ -385,7 +433,14 @@ def main():
                 all_predictions = np.array(all_predictions)
                 all_labels = np.array(all_labels)
                 class_result_valid = model.calculate_classification_metrics(all_predictions, all_labels)
-                torch.save(model.state_dict(), './weights/model.pt')
+                torch.save(model.state_dict(), run_dir / "best_model.pt")
+                best_valid_metrics = valid_metric_summary(
+                    all_predictions,
+                    all_labels,
+                    pass_num + 1,
+                    avg_valid_loss,
+                    avg_valid_acc,
+                )
                 final_test_valid = True
             valid_end_time = time.time()
             epoch_valid_time = valid_end_time - train_end_time
@@ -403,6 +458,17 @@ def main():
                 train_fps,
                 epoch_valid_time,
                 valid_fps
+            )
+            train_log_rows.append(
+                dict(
+                    epoch=pass_num + 1,
+                    train_loss=float(avg_train_loss),
+                    train_accuracy=float(avg_train_acc),
+                    valid_loss=float(avg_valid_loss),
+                    valid_accuracy=float(avg_valid_acc),
+                    best_valid_accuracy=float(best_valid_acc),
+                    lr=float(optimizer.param_groups[0]['lr']),
+                )
             )
             if not config["skip_test"]:
                 all_predictions = []
@@ -438,6 +504,13 @@ def main():
     logger.log_end_of_training(avg_train_time, avg_valid_time, avg_test_time, class_result_train, class_result_valid,
                                class_result_test_train, class_result_test_valid)
     logger.log_start_of_outputs()
+    write_csv(
+        run_dir / "training_metrics.csv",
+        ["epoch", "train_loss", "train_accuracy", "valid_loss", "valid_accuracy", "best_valid_accuracy", "lr"],
+        train_log_rows,
+    )
+    if best_valid_metrics is not None:
+        write_json(run_dir / "metrics_summary.json", best_valid_metrics)
     # 训练完成后，绘制损失曲线
     logger.plot_metrics(train_losses, valid_losses, train_accuracies, valid_accuracies, is_save=True)
     logger.clean_up_logger()

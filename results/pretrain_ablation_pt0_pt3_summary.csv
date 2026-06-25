@@ -1,0 +1,5 @@
+group,pretrain_type,pretrain_checkpoint,pretrain_best_valid_loss,finetune_run,valid_accuracy,valid_macro_f1,valid_road_f1,valid_field_f1,pred_road_rate,notes
+PT0_no_pretrain,none,,,"runs/PT0_no_pretrain_seed42",,,,,,template only; not trained
+PT1_current_masked_pretrain,current_masked,weights/PT1_current_masked_pretrain.pt,,"runs/PT1_current_masked_pretrain_finetune_seed42",,,,,,template only; not trained
+PT2_edge_weight_pretrain,self_supervised_edge_weight,weights/PT2_edge_weight_pretrain.pt,,"runs/PT2_edge_weight_finetune_seed42",,,,,,template only; not trained
+PT3_edge_type_weight_pretrain,self_supervised_edge_type_weight,weights/PT3_edge_type_weight_pretrain.pt,,"runs/PT3_edge_type_weight_finetune_seed42",,,,,,template only; not trained
