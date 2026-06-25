@@ -39,7 +39,7 @@ test_loader = FieldRoadDataLoader(test_dataset, batch_size=1, shuffle=False, dro
 ####################################超参数
 device = get_default_device()
 #torch.autograd.set_detect_anomaly(True)
-total_epochs =300
+total_epochs =100
 # Set the random seed if needed
 #torch.manual_seed(2023)
 # Initialize your model, optimizer, and LR scheduler
