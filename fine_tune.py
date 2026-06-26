@@ -53,6 +53,11 @@ def parse_args():
     parser.add_argument("--skip_test", type=str2bool, nargs="?", const=True, default=True)
     parser.add_argument("--epochs", type=int, default=TOTAL_EPOCHS)
     parser.add_argument("--cache_dir", default="cache/wheat_non_iid")
+    parser.add_argument(
+        "--pretrain_mode",
+        choices=["current", "edge_weight", "edge_type_weight"],
+        default="current",
+    )
     return parser.parse_args()
 
 
@@ -78,6 +83,7 @@ def resolve_config(args, run_name, run_dir):
         skip_test=args.skip_test,
         total_epochs=args.epochs,
         cache_dir=args.cache_dir,
+        pretrain_mode=args.pretrain_mode,
     )
 
 
@@ -244,6 +250,7 @@ def build_model(config, device):
         attn_drop_rate=0.3,
         drop_path_rate=0.1,
         pretrained_path=pretrained_path,
+        pretrain_mode=config["pretrain_mode"],
     ).to(device)
     return model
 

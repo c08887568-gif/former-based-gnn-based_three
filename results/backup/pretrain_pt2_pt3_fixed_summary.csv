@@ -1,0 +1,3 @@
+group,pretrain_type,finetune_run,valid_accuracy,valid_macro_f1,valid_road_f1,valid_field_f1,best_epoch,notes
+PT2_edge_weight_pretrain_fixed,edge_weight,PT2_edge_weight_finetune_40ep_fixed,0.879729,0.820152,0.716639,0.923664,40,completed
+PT3_edge_type_weight_pretrain_fixed,edge_type_weight,PT3_edge_type_weight_finetune_40ep_fixed,0.878751,0.819999,0.717162,0.922836,37,completed

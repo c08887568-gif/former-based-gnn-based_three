@@ -20,7 +20,7 @@ COMMANDS = [
     ),
     (
         "PT2 fine-tune",
-        "python fine_tune.py --use_pretrain true --pretrained_path weights/PT2_edge_weight_pretrain.pt --run_name PT2_edge_weight_finetune_seed42 --skip_test true",
+        "python fine_tune.py --use_pretrain true --pretrained_path weights/PT2_edge_weight_pretrain.pt --pretrain_mode edge_weight --run_name PT2_edge_weight_finetune_seed42 --skip_test true",
     ),
     (
         "PT3 pretrain",
@@ -28,7 +28,7 @@ COMMANDS = [
     ),
     (
         "PT3 fine-tune",
-        "python fine_tune.py --use_pretrain true --pretrained_path weights/PT3_edge_type_weight_pretrain.pt --run_name PT3_edge_type_weight_finetune_seed42 --skip_test true",
+        "python fine_tune.py --use_pretrain true --pretrained_path weights/PT3_edge_type_weight_pretrain.pt --pretrain_mode edge_type_weight --run_name PT3_edge_type_weight_finetune_seed42 --skip_test true",
     ),
 ]
 
