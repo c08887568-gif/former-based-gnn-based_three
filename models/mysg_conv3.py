@@ -110,6 +110,10 @@ class SGConv(MessagePassing):
             _,C=res_out.shape
             adj = torch.zeros((N, N), dtype=torch.float32, device=x.device)
             adj[edge_index[0, :], edge_index[1, :]] = 1.0
+            adj_weight = None
+            if edge_weight is not None:
+                adj_weight = torch.zeros((N, N), dtype=x.dtype, device=x.device)
+                adj_weight[edge_index[0, :], edge_index[1, :]] = edge_weight.to(x.device).to(x.dtype)
             # 构建mask
             # 沿特征通道切割为不同头
             qkv = self.qkv(x).view(N, 2, 1, self.out_channels).permute(1, 2, 0, 3)
@@ -128,10 +132,13 @@ class SGConv(MessagePassing):
             edge_index_mask = torch.gt(attnclone, 0)
             rows, cols = torch.nonzero(edge_index_mask, as_tuple=True)
             edge_index_mask = torch.stack([rows, cols])
+            edge_weight_mask = None
+            if adj_weight is not None:
+                edge_weight_mask = adj_weight[rows, cols]
             if self.normalize:
                 if isinstance(edge_index_mask, Tensor):
-                    edge_index_mask, edge_weight = gcn_norm(  # yapf: disable
-                        edge_index_mask, edge_weight, x.size(self.node_dim),
+                    edge_index_mask, edge_weight_mask = gcn_norm(  # yapf: disable
+                        edge_index_mask, edge_weight_mask, x.size(self.node_dim),
                         improved=False, add_self_loops=False, flow=self.flow,
                         dtype=x.dtype)
 
@@ -144,7 +151,7 @@ class SGConv(MessagePassing):
                 res_out = self.lins[0](x) ##残差连接
                 for lin in self.lins[1:]:
                     # propagate_type: (x: Tensor, edge_weight: OptTensor)
-                    x_filtered = self.propagate(edge_index_mask, x=x_filtered, edge_weight=edge_weight)
+                    x_filtered = self.propagate(edge_index_mask, x=x_filtered, edge_weight=edge_weight_mask)
                     sub_out = res_out + lin.forward(x_filtered) #残差连接
                     res_out=sub_out
                 outputs.append(self.filters[i](sub_out))

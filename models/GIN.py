@@ -67,8 +67,13 @@ class GIN(nn.Module):
             learner = getattr(conv, "edge_type_weight_learner", None)
             if learner is not None and hasattr(learner, "reset_parameters"):
                 learner.reset_parameters()
-    def graph_random_masking(self, x, edge_index,mask_ratio):
+    def graph_random_masking(self, x, edge_index,mask_ratio, edge_weight=None):
         L, D = x.shape
+        if mask_ratio <= 0:
+            mask = torch.zeros(L, device=x.device)
+            ids_restore = torch.arange(L, device=x.device)
+            return x, edge_index, edge_weight, mask, ids_restore
+
         len_keep = int(L * (1 - mask_ratio))
 
         noise = torch.rand(L, device=x.device)
@@ -80,18 +85,25 @@ class GIN(nn.Module):
         x_masked = x[ids_keep]
         adj = torch.zeros((L, L), dtype=torch.float32, device=x.device)
         adj[edge_index[0, :], edge_index[1,:]] = 1.0
+        adj_weight = None
+        if edge_weight is not None:
+            adj_weight = torch.zeros((L, L), dtype=torch.float32, device=x.device)
+            adj_weight[edge_index[0, :], edge_index[1, :]] = edge_weight.to(x.device).to(torch.float32)
         adj_masked = adj[:,ids_keep][ids_keep,:]
         rows, cols = torch.nonzero(adj_masked, as_tuple=True)
         # 按照源节点和目标节点的顺序构建新的张量
         edge_index_masked = torch.stack([rows, cols]).to(x.device)
+        edge_weight_masked = None
+        if adj_weight is not None:
+            edge_weight_masked = adj_weight[:, ids_keep][ids_keep, :][rows, cols]
         mask = torch.ones(L, device=x.device)
         mask[:len_keep] = 0
         mask = mask[ ids_restore]
-        return x_masked, edge_index_masked,mask, ids_restore
-    def forward_features(self, x, edge_index,mask_ratio=0):
-        x, edge_index,mask,ids_restore  = self.graph_random_masking(x,edge_index ,mask_ratio)
-        x = F.relu(self.conv1(x, edge_index))
-        x = F.relu(self.conv2(x, edge_index))
+        return x_masked, edge_index_masked, edge_weight_masked, mask, ids_restore
+    def forward_features(self, x, edge_index,mask_ratio=0, edge_weight=None):
+        x, edge_index, edge_weight, mask,ids_restore  = self.graph_random_masking(x,edge_index ,mask_ratio, edge_weight)
+        x = F.relu(self.conv1(x, edge_index, edge_weight=edge_weight))
+        x = F.relu(self.conv2(x, edge_index, edge_weight=edge_weight))
         x = self.drop(x)
         return x,mask,ids_restore
     def get_pretrain_edge_statistics(self):
@@ -133,7 +145,8 @@ class GIN(nn.Module):
     def forward(self, data):
         x = data.x
         edge_index = data.edge_index
-        x,_,_ = self.forward_features(x,edge_index)
+        edge_weight = getattr(data, "edge_weight", None)
+        x,_,_ = self.forward_features(x,edge_index,edge_weight=edge_weight)
         out = self.head(x)
         return F.log_softmax(out, dim=1)
     def forward_loss(self,pred,label,loss_config):

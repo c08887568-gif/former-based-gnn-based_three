@@ -4,12 +4,21 @@ import json
 import sys
 from pathlib import Path
 
-import torch
-import torch.nn.functional as F
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from utils.threading_config import (
+    apply_torch_thread_config,
+    configure_default_threads,
+    get_runtime_thread_count,
+)
+
+configure_default_threads()
+
+import torch
+apply_torch_thread_config(torch)
+import torch.nn.functional as F
 
 from dataset import CachedGraphDataset
 from models.Encoder import VIT_GIN_Parallel
@@ -39,6 +48,8 @@ def parse_args():
     parser.add_argument("--cache_dir", default="cache/wheat_non_iid")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
     parser.add_argument("--num_edge_types", type=int, default=4)
+    parser.add_argument("--include_original_edge_weight", type=str2bool, nargs="?", const=True, default=False)
+    parser.add_argument("--negative_edge_weight", choices=["zero", "filter"], default="zero")
     return parser.parse_args()
 
 
@@ -194,6 +205,24 @@ def generate_extra_edges(embeddings, original_edge_index, topk):
     return extra_edge_index, extra_edge_weight
 
 
+def cosine_edge_weight(embeddings, edge_index, negative_action="zero", preserve_edges=True):
+    if edge_index.numel() == 0:
+        return torch.empty((0,), dtype=torch.float32), edge_index.detach().cpu().to(torch.long)
+
+    embeddings = F.normalize(embeddings, p=2, dim=1)
+    edge_index = edge_index.to(torch.long).to(embeddings.device)
+    src, dst = edge_index[0], edge_index[1]
+    weights = (embeddings[src] * embeddings[dst]).sum(dim=1)
+    if negative_action == "filter" and not preserve_edges:
+        keep = weights >= 0
+        edge_index = edge_index[:, keep]
+        weights = weights[keep]
+    else:
+        weights = weights.clamp_min(0)
+    weights = weights.clamp(0, 1)
+    return weights.detach().cpu().to(torch.float32), edge_index.detach().cpu().to(torch.long)
+
+
 def infer_edge_type_prob(model, points, extra_edge_index, device):
     if extra_edge_index.numel() == 0:
         return None
@@ -215,6 +244,14 @@ def build_cache_item(model, dataset, index, args, device):
     points, edge_index = trim_sample(points, edge_index, args.max_len)
     embeddings = extract_graph_embeddings(model, points, edge_index, device)
     extra_edge_index, extra_edge_weight = generate_extra_edges(embeddings, edge_index, args.topk)
+    original_edge_weight = None
+    if args.include_original_edge_weight:
+        original_edge_weight, edge_index = cosine_edge_weight(
+            embeddings,
+            edge_index,
+            negative_action=args.negative_edge_weight,
+            preserve_edges=True,
+        )
     extra_edge_type_prob = infer_edge_type_prob(model, points, extra_edge_index, device)
 
     item = dict(
@@ -226,6 +263,9 @@ def build_cache_item(model, dataset, index, args, device):
         original_num_edges=int(edge_index.shape[1]),
         extra_num_edges=int(extra_edge_index.shape[1]),
     )
+    if original_edge_weight is not None:
+        item["original_edge_weight"] = original_edge_weight
+        item["edge_weight_source"] = "pretrained_encoder_cosine_clamped"
     if extra_edge_type_prob is not None:
         item["extra_edge_type_prob"] = extra_edge_type_prob
     return item
@@ -278,6 +318,9 @@ def main():
             max_len=args.max_len,
             cache_dir=args.cache_dir,
             loaded_encoder_keys=len(loaded_keys),
+            include_original_edge_weight=args.include_original_edge_weight,
+            negative_edge_weight=args.negative_edge_weight,
+            runtime_num_threads=get_runtime_thread_count(),
         )
         (output_cache / "manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False),

@@ -5,13 +5,22 @@ import shutil
 import sys
 from pathlib import Path
 
-import torch
-import torch.optim as optim
-from torch_geometric.data import Data
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from utils.threading_config import (
+    apply_torch_thread_config,
+    configure_default_threads,
+    get_runtime_thread_count,
+)
+
+configure_default_threads()
+
+import torch
+apply_torch_thread_config(torch)
+import torch.optim as optim
+from torch_geometric.data import Data
 
 from dataset import CachedGraphDataset
 from models.Pretrain import Pretrain_Parallel
@@ -225,6 +234,7 @@ def run_pretrain(default_run_name, default_weight_path, pretrain_mode):
         run_dir=str(run_dir),
         output_weight=str(weight_path),
         command=" ".join(sys.argv),
+        runtime_num_threads=get_runtime_thread_count(),
     )
     write_json(run_dir / "config_resolved.json", config)
     (run_dir / "command.txt").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")

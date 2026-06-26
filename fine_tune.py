@@ -8,9 +8,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from utils.threading_config import (
+    apply_torch_thread_config,
+    configure_default_threads,
+    get_runtime_thread_count,
+)
+
+configure_default_threads()
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+apply_torch_thread_config(torch)
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
@@ -88,6 +97,7 @@ def resolve_config(args, run_name, run_dir):
         cache_dir=args.cache_dir,
         graph_cache_path=graph_cache_path,
         pretrain_mode=args.pretrain_mode,
+        runtime_num_threads=get_runtime_thread_count(),
     )
 
 
@@ -154,6 +164,34 @@ def valid_metric_summary(predictions, labels, epoch, valid_loss, valid_acc):
         valid_road_f1=float(report["road"]["f1-score"]),
         valid_field_f1=float(report["field"]["f1-score"]),
         pred_road_rate=float((predictions == 0).mean()) if len(predictions) else 0.0,
+    )
+
+
+def test_metric_summary(predictions, labels, epoch):
+    labels = np.asarray(labels).reshape(-1)
+    predictions = np.asarray(predictions)
+    if predictions.ndim > 1:
+        predictions = np.argmax(predictions, axis=1)
+    predictions = predictions.reshape(-1)
+    report = classification_report(
+        labels,
+        predictions,
+        labels=[0, 1],
+        target_names=["road", "field"],
+        output_dict=True,
+        zero_division=0,
+    )
+    pred_road_rate = float((predictions == 0).mean()) if len(predictions) else 0.0
+    pred_field_rate = float((predictions == 1).mean()) if len(predictions) else 0.0
+    return dict(
+        test_epoch=epoch,
+        test_accuracy=float((predictions == labels).mean()) if len(predictions) else 0.0,
+        test_macro_f1=float(report["macro avg"]["f1-score"]),
+        test_road_f1=float(report["road"]["f1-score"]),
+        test_field_f1=float(report["field"]["f1-score"]),
+        pred_road_rate=pred_road_rate,
+        pred_field_rate=pred_field_rate,
+        collapse_flag=bool(pred_road_rate < 0.05 or pred_field_rate < 0.05),
     )
 
 
@@ -352,11 +390,35 @@ def find_graph_cache_item(graph_cache, trace_id, points):
     return items[0]
 
 
-def deduplicate_directed_edges(original_edge_index, extra_edge_index):
+def deduplicate_directed_edges(
+    original_edge_index,
+    extra_edge_index,
+    original_edge_weight=None,
+    extra_edge_weight=None,
+):
     original_edges = int(original_edge_index.shape[1])
     extra_edges_before_dedup = int(extra_edge_index.shape[1])
+    has_edge_weight = original_edge_weight is not None or extra_edge_weight is not None
+    if has_edge_weight:
+        if original_edge_weight is None:
+            original_edge_weight = torch.ones(
+                original_edges,
+                dtype=torch.float32,
+                device=original_edge_index.device,
+            )
+        else:
+            original_edge_weight = original_edge_weight.to(torch.float32).to(original_edge_index.device)
+        if extra_edge_weight is None:
+            extra_edge_weight = torch.ones(
+                extra_edges_before_dedup,
+                dtype=torch.float32,
+                device=extra_edge_index.device,
+            )
+        else:
+            extra_edge_weight = extra_edge_weight.to(torch.float32).to(extra_edge_index.device)
+
     if extra_edges_before_dedup == 0:
-        return original_edge_index, dict(
+        return original_edge_index, original_edge_weight if has_edge_weight else None, dict(
             original_edges=original_edges,
             extra_edges_before_dedup=0,
             duplicate_edges_removed=0,
@@ -382,11 +444,17 @@ def deduplicate_directed_edges(original_edge_index, extra_edge_index):
         index = torch.tensor(keep_extra_indices, dtype=torch.long, device=extra_edge_index.device)
         unique_extra_edge_index = extra_edge_index.index_select(1, index)
         merged_edge_index = torch.cat([original_edge_index, unique_extra_edge_index], dim=1)
+        if has_edge_weight:
+            unique_extra_edge_weight = extra_edge_weight.index_select(0, index)
+            merged_edge_weight = torch.cat([original_edge_weight, unique_extra_edge_weight], dim=0)
+        else:
+            merged_edge_weight = None
     else:
         merged_edge_index = original_edge_index
+        merged_edge_weight = original_edge_weight if has_edge_weight else None
 
     duplicate_edges_removed = extra_edges_before_dedup - len(keep_extra_indices)
-    return merged_edge_index, dict(
+    return merged_edge_index, merged_edge_weight, dict(
         original_edges=original_edges,
         extra_edges_before_dedup=extra_edges_before_dedup,
         duplicate_edges_removed=duplicate_edges_removed,
@@ -409,14 +477,26 @@ def merge_graph_cache_edges(
     edge_index = to_edge_index(adjs, device)
     cache_item = find_graph_cache_item(graph_cache, trace_id, points)
     if cache_item is None:
-        return edge_index
+        return edge_index, None
+
+    original_edge_weight = cache_item.get("original_edge_weight")
+    if original_edge_weight is not None:
+        original_edge_weight = torch.as_tensor(original_edge_weight).clone().detach()
+        if original_edge_weight.numel() != edge_index.shape[1]:
+            original_edge_weight = None
 
     extra_edge_index = cache_item.get("extra_edge_index")
     if extra_edge_index is None:
-        return edge_index
+        return edge_index, original_edge_weight.to(torch.float32).to(device) if original_edge_weight is not None else None
     extra_edge_index = torch.as_tensor(extra_edge_index)
     if extra_edge_index.numel() == 0:
-        return edge_index
+        return edge_index, original_edge_weight.to(torch.float32).to(device) if original_edge_weight is not None else None
+
+    extra_edge_weight = cache_item.get("extra_edge_weight")
+    if extra_edge_weight is not None:
+        extra_edge_weight = torch.as_tensor(extra_edge_weight).clone().detach()
+        if extra_edge_weight.numel() != extra_edge_index.shape[1]:
+            extra_edge_weight = None
 
     extra_edge_index = extra_edge_index.clone().detach().to(torch.long).to(device)
     num_nodes = int(points.shape[0])
@@ -427,9 +507,16 @@ def merge_graph_cache_edges(
         & (extra_edge_index[1] < num_nodes)
     )
     extra_edge_index = extra_edge_index[:, valid_mask]
+    if extra_edge_weight is not None:
+        extra_edge_weight = extra_edge_weight[valid_mask.detach().cpu()]
     if extra_edge_index.numel() == 0:
-        return edge_index
-    merged_edge_index, stats = deduplicate_directed_edges(edge_index, extra_edge_index)
+        return edge_index, original_edge_weight.to(torch.float32).to(device) if original_edge_weight is not None else None
+    merged_edge_index, merged_edge_weight, stats = deduplicate_directed_edges(
+        edge_index,
+        extra_edge_index,
+        original_edge_weight=original_edge_weight.to(device) if original_edge_weight is not None else None,
+        extra_edge_weight=extra_edge_weight.to(device) if extra_edge_weight is not None else None,
+    )
     if audit_path is not None:
         append_graph_dedup_audit(
             audit_path,
@@ -442,7 +529,57 @@ def merge_graph_cache_edges(
                 **stats,
             ),
         )
-    return merged_edge_index
+    return merged_edge_index, merged_edge_weight
+
+
+def build_data(points, edge_index, labels, edge_weight=None):
+    data = Data(x=points, edge_index=edge_index, y=labels)
+    if edge_weight is not None:
+        data.edge_weight = edge_weight.to(torch.float32).to(points.device)
+    return data
+
+
+def evaluate_test_once(
+    model,
+    test_loader,
+    test_graph_cache,
+    device,
+    audit_path=None,
+    run_name=None,
+    epoch=None,
+):
+    model.eval()
+    all_predictions = []
+    all_labels = []
+    test_num_samples = 0
+    start_time = time.time()
+    with torch.no_grad():
+        for batch_id, (points, labels, adjs, trace_id) in enumerate(test_loader()):
+            points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
+            labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
+            edge_index, edge_weight = merge_graph_cache_edges(
+                adjs,
+                test_graph_cache,
+                trace_id,
+                points,
+                device,
+                audit_path=audit_path,
+                run_name=run_name,
+                split="test",
+                epoch=epoch,
+                batch_id=batch_id,
+            )
+            data = build_data(points, edge_index, labels, edge_weight=edge_weight)
+            pred = model.test_step(data)
+            all_predictions.extend(pred.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            test_num_samples += points.shape[0]
+    test_time = time.time() - start_time
+    test_fps = test_num_samples / max(test_time, 1e-12)
+    all_predictions = np.array(all_predictions)
+    all_labels = np.array(all_labels)
+    class_result = model.calculate_classification_metrics(all_predictions, all_labels)
+    return class_result, test_metric_summary(all_predictions, all_labels, epoch), test_time, test_fps
 
 
 def main():
@@ -568,12 +705,10 @@ def main():
     valid_accuracies = []
     class_result_train = None
     class_result_valid = None
-    class_result_test_train = None
     class_result_test_valid = None
-    final_test_train = False
-    final_test_valid = False
     train_log_rows = []
     best_valid_metrics = None
+    best_test_metrics = None
     for pass_num in range(total_epochs):
         model.train()
         epoch_start_time = time.time()
@@ -585,7 +720,7 @@ def main():
         for batch_id, (points, labels, adjs, trace_id) in enumerate(train_loader()):
             points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
             labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-            edge_index = merge_graph_cache_edges(
+            edge_index, edge_weight = merge_graph_cache_edges(
                 adjs,
                 train_graph_cache,
                 trace_id,
@@ -597,7 +732,7 @@ def main():
                 epoch=pass_num + 1,
                 batch_id=batch_id,
             )
-            data = Data(x=points, edge_index=edge_index, y=labels)
+            data = build_data(points, edge_index, labels, edge_weight=edge_weight)
             pred, loss, acc = model.train_step(data, labels, optimizer, loss_config)
             trajectory_length = points.shape[0]
             train_loss_total += loss * trajectory_length
@@ -618,7 +753,6 @@ def main():
             all_predictions = np.array(all_predictions)
             all_labels = np.array(all_labels)
             class_result_train = model.calculate_classification_metrics(all_predictions, all_labels)
-            final_test_train = True
         scheduler.step()
         with torch.no_grad():
             model.eval()
@@ -630,7 +764,7 @@ def main():
             for batch_id, (points, labels, adjs, trace_id) in enumerate(valid_loader()):
                 points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
                 labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-                edge_index = merge_graph_cache_edges(
+                edge_index, edge_weight = merge_graph_cache_edges(
                     adjs,
                     valid_graph_cache,
                     trace_id,
@@ -642,7 +776,7 @@ def main():
                     epoch=pass_num + 1,
                     batch_id=batch_id,
                 )
-                data = Data(x=points, edge_index=edge_index, y=labels)
+                data = build_data(points, edge_index, labels, edge_weight=edge_weight)
                 pred, loss, acc = model.valid_step(data, labels, None)
                 trajectory_length = points.shape[0]
                 valid_loss_total += loss * trajectory_length
@@ -667,7 +801,6 @@ def main():
                     avg_valid_loss,
                     avg_valid_acc,
                 )
-                final_test_valid = True
             valid_end_time = time.time()
             epoch_valid_time = valid_end_time - train_end_time
             total_valid_time += epoch_valid_time
@@ -696,50 +829,28 @@ def main():
                     lr=float(optimizer.param_groups[0]['lr']),
                 )
             )
-            if not config["skip_test"]:
-                all_predictions = []
-                all_labels = []
-                test_num_samples = 0
-                for batch_id, (points, labels, adjs, trace_id) in enumerate(test_loader()):
-                    points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
-                    labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-                    edge_index = merge_graph_cache_edges(
-                        adjs,
-                        test_graph_cache,
-                        trace_id,
-                        points,
-                        device,
-                        audit_path=graph_dedup_audit_path,
-                        run_name=run_name,
-                        split="test",
-                        epoch=pass_num + 1,
-                        batch_id=batch_id,
-                    )
-                    data = Data(x=points, edge_index=edge_index, y=labels)
-                    pred = model.test_step(data)
-                    all_predictions.extend(pred.cpu().numpy())
-                    all_labels.extend(labels.cpu().numpy())
-                    test_num_samples += points.shape[0]
-                all_predictions = np.array(all_predictions)
-                all_labels = np.array(all_labels)
-                class_result = model.calculate_classification_metrics(all_predictions, all_labels)
-                end_time = time.time()
-                epoch_test_time = end_time - valid_end_time
-                total_test_time += epoch_test_time
-                test_fps = test_num_samples / epoch_test_time
-                logger.log_test_info(epoch_test_time, test_fps, class_result)
-                if final_test_train == True:
-                    class_result_test_train = class_result
-                    final_test_train = False
-                if final_test_valid == True:
-                    class_result_test_valid = class_result
-                    final_test_valid = False
+    if not config["skip_test"] and test_loader is not None:
+        best_model_path = run_dir / "best_model.pt"
+        if best_model_path.exists():
+            model.load_state_dict(torch.load(best_model_path, map_location=device))
+        test_epoch = best_valid_metrics["best_epoch"] if best_valid_metrics is not None else total_epochs
+        class_result_test_valid, best_test_metrics, test_time, test_fps = evaluate_test_once(
+            model,
+            test_loader,
+            test_graph_cache,
+            device,
+            audit_path=graph_dedup_audit_path,
+            run_name=run_name,
+            epoch=test_epoch,
+        )
+        total_test_time += test_time
+        logger.log_test_info(test_time, test_fps, class_result_test_valid)
     # Calculate average training and evaluation times
     avg_train_time = total_train_time / total_epochs
     avg_valid_time = total_valid_time / total_epochs
-    avg_test_time = total_test_time / total_epochs
+    avg_test_time = total_test_time if not config["skip_test"] else 0
     logger.log_end_of_training(avg_train_time, avg_valid_time, avg_test_time, class_result_train, class_result_valid,
-                               class_result_test_train, class_result_test_valid)
+                               None, class_result_test_valid)
     logger.log_start_of_outputs()
     write_csv(
         run_dir / "training_metrics.csv",
@@ -748,6 +859,8 @@ def main():
     )
     if best_valid_metrics is not None:
         write_json(run_dir / "metrics_summary.json", best_valid_metrics)
+    if best_test_metrics is not None:
+        write_json(run_dir / "test_metrics_summary.json", best_test_metrics)
     # 训练完成后，绘制损失曲线
     logger.plot_metrics(train_losses, valid_losses, train_accuracies, valid_accuracies, is_save=True)
     logger.clean_up_logger()

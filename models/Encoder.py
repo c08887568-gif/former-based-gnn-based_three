@@ -48,9 +48,14 @@ class VIT_GIN_Parallel(nn.Module):
         self.head = nn.Linear(2*embed_dim,num_classes)
         if pretrained_path is not None:
             self.load_pretrained_encoder(pretrained_path)
-    def forward_features(self, x, edge_index, mask_ratio_image=0,mask_ratio_graph=0):
+    def forward_features(self, x, edge_index, mask_ratio_image=0,mask_ratio_graph=0, edge_weight=None):
         x_image,mask_image,ids_restore_image = self.vision.forward_features(x,mask_ratio_image)
-        x_graph,mask_graph,ids_restore_graph = self.graph.forward_features(x.squeeze(),edge_index,mask_ratio_graph)
+        x_graph,mask_graph,ids_restore_graph = self.graph.forward_features(
+            x.squeeze(),
+            edge_index,
+            mask_ratio_graph,
+            edge_weight=edge_weight,
+        )
         return x_image,mask_image,ids_restore_image,x_graph,mask_graph,ids_restore_graph
     def get_pretrain_edge_statistics(self):
         if hasattr(self.graph, "get_pretrain_edge_statistics"):
@@ -59,7 +64,8 @@ class VIT_GIN_Parallel(nn.Module):
     def forward(self, data):
         x = data.x.view(-1,1,43,1)
         edge_index = data.edge_index
-        x_image,_,_,x_graph,_,_ = self.forward_features(x,edge_index)
+        edge_weight = getattr(data, "edge_weight", None)
+        x_image,_,_,x_graph,_,_ = self.forward_features(x,edge_index,edge_weight=edge_weight)
         x_image = x_image[:, 1:, :].mean(dim=1) 
         x_image = self.image_norm(x_image)
         out_image = self.head_image(x_image)
