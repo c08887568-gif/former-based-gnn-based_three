@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -53,6 +54,7 @@ def parse_args():
     parser.add_argument("--skip_test", type=str2bool, nargs="?", const=True, default=True)
     parser.add_argument("--epochs", type=int, default=TOTAL_EPOCHS)
     parser.add_argument("--cache_dir", default="cache/wheat_non_iid")
+    parser.add_argument("--graph_cache_path", default=None)
     parser.add_argument(
         "--pretrain_mode",
         choices=["current", "edge_weight", "edge_type_weight"],
@@ -73,6 +75,7 @@ def write_json(path, data):
 def resolve_config(args, run_name, run_dir):
     pretrained_path = normalize_optional_path(args.pretrained_path)
     effective_pretrained_path = pretrained_path if args.use_pretrain else None
+    graph_cache_path = normalize_optional_path(args.graph_cache_path)
     return dict(
         use_pretrain=args.use_pretrain,
         pretrained_path=pretrained_path,
@@ -83,6 +86,7 @@ def resolve_config(args, run_name, run_dir):
         skip_test=args.skip_test,
         total_epochs=args.epochs,
         cache_dir=args.cache_dir,
+        graph_cache_path=graph_cache_path,
         pretrain_mode=args.pretrain_mode,
     )
 
@@ -99,6 +103,33 @@ def write_csv(path, fieldnames, rows):
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+GRAPH_DEDUP_AUDIT_FIELDS = [
+    "run_name",
+    "split",
+    "epoch",
+    "batch_id",
+    "trace_id",
+    "original_edges",
+    "extra_edges_before_dedup",
+    "duplicate_edges_removed",
+    "merged_edges_after_dedup",
+]
+
+
+def initialize_graph_dedup_audit(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=GRAPH_DEDUP_AUDIT_FIELDS)
+        writer.writeheader()
+
+
+def append_graph_dedup_audit(path, row):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=GRAPH_DEDUP_AUDIT_FIELDS)
+        writer.writerow(row)
 
 
 def valid_metric_summary(predictions, labels, epoch, valid_loss, valid_acc):
@@ -255,6 +286,165 @@ def build_model(config, device):
     return model
 
 
+def normalize_trace_id(trace_id):
+    if isinstance(trace_id, torch.Tensor):
+        if trace_id.numel() == 1:
+            return str(trace_id.item())
+        return str(trace_id.detach().cpu().tolist())
+    if isinstance(trace_id, (list, tuple)):
+        if len(trace_id) == 1:
+            return normalize_trace_id(trace_id[0])
+        return str(tuple(normalize_trace_id(value) for value in trace_id))
+    return str(trace_id)
+
+
+def tensor_content_hash(tensor):
+    value = tensor.detach().cpu().contiguous()
+    digest = hashlib.sha1()
+    digest.update(str(tuple(value.shape)).encode("utf-8"))
+    digest.update(str(value.dtype).encode("utf-8"))
+    digest.update(value.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def load_graph_cache_split(graph_cache_path, split, required=True):
+    if graph_cache_path is None:
+        return None
+    cache_file = Path(graph_cache_path) / f"{split}.pt"
+    if not cache_file.exists():
+        if required:
+            raise FileNotFoundError(f"GRAPH_CACHE_SPLIT_NOT_FOUND: {cache_file}")
+        return None
+
+    raw_cache = torch.load(cache_file, map_location="cpu")
+    if isinstance(raw_cache, dict) and "items" in raw_cache:
+        raw_cache = raw_cache["items"]
+
+    grouped = {}
+    if isinstance(raw_cache, dict):
+        iterable = raw_cache.values()
+    elif isinstance(raw_cache, list):
+        iterable = raw_cache
+    else:
+        raise TypeError(f"UNSUPPORTED_GRAPH_CACHE_FORMAT: {cache_file}")
+
+    for item in iterable:
+        if not isinstance(item, dict) or "trace_id" not in item:
+            raise TypeError(f"INVALID_GRAPH_CACHE_ITEM: {cache_file}")
+        key = normalize_trace_id(item["trace_id"])
+        grouped.setdefault(key, []).append(item)
+    return grouped
+
+
+def find_graph_cache_item(graph_cache, trace_id, points):
+    if graph_cache is None:
+        return None
+    items = graph_cache.get(normalize_trace_id(trace_id))
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+
+    points_hash = tensor_content_hash(points)
+    for item in items:
+        if item.get("points_hash") == points_hash:
+            return item
+    return items[0]
+
+
+def deduplicate_directed_edges(original_edge_index, extra_edge_index):
+    original_edges = int(original_edge_index.shape[1])
+    extra_edges_before_dedup = int(extra_edge_index.shape[1])
+    if extra_edges_before_dedup == 0:
+        return original_edge_index, dict(
+            original_edges=original_edges,
+            extra_edges_before_dedup=0,
+            duplicate_edges_removed=0,
+            merged_edges_after_dedup=original_edges,
+        )
+
+    original_cpu = original_edge_index.detach().cpu()
+    extra_cpu = extra_edge_index.detach().cpu()
+    seen = set()
+    keep_extra_indices = []
+
+    for src, dst in zip(original_cpu[0].tolist(), original_cpu[1].tolist()):
+        seen.add((int(src), int(dst)))
+
+    for idx, (src, dst) in enumerate(zip(extra_cpu[0].tolist(), extra_cpu[1].tolist())):
+        edge = (int(src), int(dst))
+        if edge in seen:
+            continue
+        seen.add(edge)
+        keep_extra_indices.append(idx)
+
+    if keep_extra_indices:
+        index = torch.tensor(keep_extra_indices, dtype=torch.long, device=extra_edge_index.device)
+        unique_extra_edge_index = extra_edge_index.index_select(1, index)
+        merged_edge_index = torch.cat([original_edge_index, unique_extra_edge_index], dim=1)
+    else:
+        merged_edge_index = original_edge_index
+
+    duplicate_edges_removed = extra_edges_before_dedup - len(keep_extra_indices)
+    return merged_edge_index, dict(
+        original_edges=original_edges,
+        extra_edges_before_dedup=extra_edges_before_dedup,
+        duplicate_edges_removed=duplicate_edges_removed,
+        merged_edges_after_dedup=int(merged_edge_index.shape[1]),
+    )
+
+
+def merge_graph_cache_edges(
+    adjs,
+    graph_cache,
+    trace_id,
+    points,
+    device,
+    audit_path=None,
+    run_name=None,
+    split=None,
+    epoch=None,
+    batch_id=None,
+):
+    edge_index = to_edge_index(adjs, device)
+    cache_item = find_graph_cache_item(graph_cache, trace_id, points)
+    if cache_item is None:
+        return edge_index
+
+    extra_edge_index = cache_item.get("extra_edge_index")
+    if extra_edge_index is None:
+        return edge_index
+    extra_edge_index = torch.as_tensor(extra_edge_index)
+    if extra_edge_index.numel() == 0:
+        return edge_index
+
+    extra_edge_index = extra_edge_index.clone().detach().to(torch.long).to(device)
+    num_nodes = int(points.shape[0])
+    valid_mask = (
+        (extra_edge_index[0] >= 0)
+        & (extra_edge_index[1] >= 0)
+        & (extra_edge_index[0] < num_nodes)
+        & (extra_edge_index[1] < num_nodes)
+    )
+    extra_edge_index = extra_edge_index[:, valid_mask]
+    if extra_edge_index.numel() == 0:
+        return edge_index
+    merged_edge_index, stats = deduplicate_directed_edges(edge_index, extra_edge_index)
+    if audit_path is not None:
+        append_graph_dedup_audit(
+            audit_path,
+            dict(
+                run_name=run_name,
+                split=split,
+                epoch=epoch,
+                batch_id=batch_id,
+                trace_id=normalize_trace_id(trace_id),
+                **stats,
+            ),
+        )
+    return merged_edge_index
+
+
 def main():
     args = parse_args()
     run_name = args.run_name or auto_run_name()
@@ -315,6 +505,13 @@ def main():
                 json="../dataset_5/dataset_high/paddy/Non-Identically_Distributed_Coco/sampled_paddy_43_test.json"
             )
             test_dataset = GraphDataset(test_path, mode='test', num_workers=2, max_len=1000, drop_rate=0)
+    train_graph_cache = load_graph_cache_split(config["graph_cache_path"], "train", required=True)
+    valid_graph_cache = load_graph_cache_split(config["graph_cache_path"], "valid", required=True)
+    test_graph_cache = load_graph_cache_split(config["graph_cache_path"], "test", required=False)
+    graph_dedup_audit_path = None
+    if config["graph_cache_path"] is not None:
+        graph_dedup_audit_path = Path("diagnostics") / "graph_cache_dedup_audit.csv"
+        initialize_graph_dedup_audit(graph_dedup_audit_path)
     logger.log_dataset_info(train_dataset, valid_dataset, test_dataset)
     # Create data loaders using PyTorch DataLoader
     train_loader = FieldRoadDataLoader(train_dataset, batch_size=1, shuffle=True, drop_last=True)
@@ -388,7 +585,18 @@ def main():
         for batch_id, (points, labels, adjs, trace_id) in enumerate(train_loader()):
             points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
             labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-            edge_index = to_edge_index(adjs, device)
+            edge_index = merge_graph_cache_edges(
+                adjs,
+                train_graph_cache,
+                trace_id,
+                points,
+                device,
+                audit_path=graph_dedup_audit_path,
+                run_name=run_name,
+                split="train",
+                epoch=pass_num + 1,
+                batch_id=batch_id,
+            )
             data = Data(x=points, edge_index=edge_index, y=labels)
             pred, loss, acc = model.train_step(data, labels, optimizer, loss_config)
             trajectory_length = points.shape[0]
@@ -422,7 +630,18 @@ def main():
             for batch_id, (points, labels, adjs, trace_id) in enumerate(valid_loader()):
                 points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
                 labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-                edge_index = to_edge_index(adjs, device)
+                edge_index = merge_graph_cache_edges(
+                    adjs,
+                    valid_graph_cache,
+                    trace_id,
+                    points,
+                    device,
+                    audit_path=graph_dedup_audit_path,
+                    run_name=run_name,
+                    split="valid",
+                    epoch=pass_num + 1,
+                    batch_id=batch_id,
+                )
                 data = Data(x=points, edge_index=edge_index, y=labels)
                 pred, loss, acc = model.valid_step(data, labels, None)
                 trajectory_length = points.shape[0]
@@ -484,7 +703,18 @@ def main():
                 for batch_id, (points, labels, adjs, trace_id) in enumerate(test_loader()):
                     points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
                     labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
-                    edge_index = to_edge_index(adjs, device)
+                    edge_index = merge_graph_cache_edges(
+                        adjs,
+                        test_graph_cache,
+                        trace_id,
+                        points,
+                        device,
+                        audit_path=graph_dedup_audit_path,
+                        run_name=run_name,
+                        split="test",
+                        epoch=pass_num + 1,
+                        batch_id=batch_id,
+                    )
                     data = Data(x=points, edge_index=edge_index, y=labels)
                     pred = model.test_step(data)
                     all_predictions.extend(pred.cpu().numpy())
