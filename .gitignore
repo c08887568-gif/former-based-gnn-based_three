@@ -10,3 +10,5 @@ cache/
 runs/
 .idea/
 models/.idea/
+outputs/prediction_html/*
+!outputs/prediction_html/.gitkeep
