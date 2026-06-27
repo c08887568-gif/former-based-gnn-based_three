@@ -62,15 +62,18 @@ class GraphDataset(Dataset):
         )
 
 class CachedGraphDataset(Dataset):
-    def __init__(self, cache_path, mode='train'):
+    def __init__(self, cache_path, mode='train', return_coordinates=False):
         assert mode in ['train', 'valid', 'test', 'predict'], 'mode is one of train, valid ,test, predict.'
         self.cache_path = cache_path
         self.mode = mode
+        self.return_coordinates = return_coordinates
         self.data = torch.load(cache_path, map_location='cpu')
 
     def __getitem__(self, index):
         item = self.data[index]
-        if self.mode == 'predict':
+        if self.mode == 'predict' or self.return_coordinates:
+            if 'coordinates' not in item:
+                raise ValueError("AUX_COORDINATES_NOT_FOUND")
             return item['points'], item['labels'], item['edge_index'], item['trace_id'], item['coordinates']
         return item['points'], item['labels'], item['edge_index'], item['trace_id']
 
@@ -82,6 +85,7 @@ class CachedGraphDataset(Dataset):
             f"CachedGraphDataset(\n"
             f"  Cache: {self.cache_path}\n"
             f"  Mode: {self.mode}\n"
+            f"  Return coordinates: {self.return_coordinates}\n"
             f"  Samples: {len(self.data)}\n"
             f")"
         )

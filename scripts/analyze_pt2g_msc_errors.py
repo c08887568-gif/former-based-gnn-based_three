@@ -38,6 +38,8 @@ def parse_args():
     parser.add_argument("--baseline_error_dir", default="diagnostics/pt2g_finetune_40ep_error_analysis")
     parser.add_argument("--baseline_test_predictions", default="diagnostics/predictions/PT2G_finetune_40ep_test_predictions_detailed.csv")
     parser.add_argument("--baseline_summary", default="results/ptg_finetune_40ep_test_summary.csv")
+    parser.add_argument("--segment_context_mode", choices=["none", "msc"], default="msc")
+    parser.add_argument("--msc_aux_mode", choices=["none", "sd", "rc", "rcsd"], default="none")
     parser.add_argument("--max_len", type=int, default=1000)
     parser.add_argument("--near_boundary", type=int, default=20)
     parser.add_argument("--force_eval", action="store_true")
@@ -183,13 +185,14 @@ def generate_predictions_if_needed(args):
         return
 
     import torch
-    from fine_tune import build_data, build_model, load_graph_cache_split, merge_graph_cache_edges
+    from fine_tune import build_data, build_model, load_graph_cache_split, merge_graph_cache_edges, prepare_aux_features
     from utils.utils import get_default_device
 
     config = dict(
         effective_pretrained_path=None,
         pretrain_mode="edge_weight",
-        segment_context_mode="msc",
+        segment_context_mode=args.segment_context_mode,
+        msc_aux_mode=args.msc_aux_mode,
     )
     device = get_default_device()
     model = build_model(config, device)
@@ -221,6 +224,11 @@ def generate_predictions_if_needed(args):
                 if coordinates is None:
                     coordinates = torch.zeros((points.shape[0], 2), dtype=torch.float32)
                 coordinates = coordinates.clone().detach().cpu().to(torch.float32)
+                aux_features = (
+                    prepare_aux_features(coordinates, points, device)
+                    if args.msc_aux_mode != "none"
+                    else None
+                )
                 crop_index = trace_crop_counts[trace_id]
                 trace_crop_counts[trace_id] += 1
                 edge_index, edge_weight = merge_graph_cache_edges(
@@ -235,7 +243,7 @@ def generate_predictions_if_needed(args):
                     epoch=None,
                     batch_id=sample_index,
                 )
-                data = build_data(points, edge_index, labels, edge_weight=edge_weight)
+                data = build_data(points, edge_index, labels, edge_weight=edge_weight, aux_features=aux_features)
                 logits = model.test_step(data)
                 probs = torch.softmax(logits, dim=1).detach().cpu().numpy()
                 preds = np.argmax(probs, axis=1)
@@ -1076,6 +1084,7 @@ def make_pack(args):
         Path("scripts/analyze_pt2g_msc_errors.py"),
         Path(args.output_dir),
         Path(args.report_path),
+        Path(args.summary_csv),
         Path(args.html_dir) / "index.html",
     ]
     with zipfile.ZipFile(pack_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:

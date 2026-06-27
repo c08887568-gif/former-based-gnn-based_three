@@ -46,6 +46,13 @@ class MultiScaleSegmentContextModule(nn.Module):
     def get_segment_scale(self):
         return 0.5 * torch.sigmoid(self.segment_scale_logit)
 
+    def compute_context(self, x):
+        context = self.norm(x).transpose(0, 1).unsqueeze(0)
+        for block in self.blocks:
+            context = block(context)
+        context = context.squeeze(0).transpose(0, 1)
+        return context, self.get_segment_scale()
+
     def get_statistics(self):
         if self._stat_count == 0:
             return dict(
@@ -75,12 +82,12 @@ class MultiScaleSegmentContextModule(nn.Module):
             self._context_norm_sum += float(context_norm.detach().cpu().item())
             self._context_to_fused_ratio_sum += float(ratio.detach().cpu().item())
 
+    def record_statistics(self, fused_before, fused_after, context):
+        self._accumulate_statistics(fused_before, fused_after, context)
+
     def forward(self, x):
         residual = x
-        context = self.norm(x).transpose(0, 1).unsqueeze(0)
-        for block in self.blocks:
-            context = block(context)
-        context = context.squeeze(0).transpose(0, 1)
-        enhanced = residual + self.get_segment_scale() * context
+        context, segment_scale = self.compute_context(x)
+        enhanced = residual + segment_scale * context
         self._accumulate_statistics(residual, enhanced, context)
         return enhanced

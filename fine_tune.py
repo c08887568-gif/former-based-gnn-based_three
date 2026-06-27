@@ -29,6 +29,7 @@ from sklearn.metrics import classification_report
 from dataset import CachedGraphDataset, GraphDataset
 from fieldroaddatapipeline.dataloader import FieldRoadDataLoader
 from models.Encoder import VIT_GIN_Parallel
+from utils.motion_state_features import AUX_FEATURE_NAMES, build_motion_state_features
 from utils.utils import WarmupCosineLR, get_default_device, to_edge_index
 
 
@@ -74,6 +75,11 @@ def parse_args():
         choices=["none", "msc"],
         default="none",
     )
+    parser.add_argument(
+        "--msc_aux_mode",
+        choices=["none", "sd", "rc", "rcsd"],
+        default="none",
+    )
     return parser.parse_args()
 
 
@@ -103,6 +109,7 @@ def resolve_config(args, run_name, run_dir):
         graph_cache_path=graph_cache_path,
         pretrain_mode=args.pretrain_mode,
         segment_context_mode=args.segment_context_mode,
+        msc_aux_mode=args.msc_aux_mode,
         runtime_num_threads=get_runtime_thread_count(),
     )
 
@@ -148,6 +155,33 @@ SEGMENT_CONTEXT_AUDIT_FIELDS = [
     "context_to_fused_ratio",
 ]
 
+MSC_AUX_AUDIT_FIELDS = [
+    "epoch",
+    "split",
+    "trace_id",
+    "segment_scale",
+    "context_to_fused_ratio",
+    "stationary_gate_mean",
+    "stationary_gate_std",
+    "stationary_gate_q25",
+    "stationary_gate_q50",
+    "stationary_gate_q75",
+    "stationary_gate_scale",
+    "stationary_context_scale",
+    "stationary_safe_gate_mean",
+    "curve_gate_mean",
+    "curve_gate_std",
+    "curve_gate_q25",
+    "curve_gate_q50",
+    "curve_gate_q75",
+    "curve_context_scale",
+    "curve_msc_boost_scale",
+    "stationary_point_rate",
+    "high_turn_point_rate",
+    "local_density_1m_mean",
+    "local_step_mean_m_mean",
+]
+
 
 def initialize_graph_dedup_audit(path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,6 +208,20 @@ def append_segment_context_audit(path, row):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=SEGMENT_CONTEXT_AUDIT_FIELDS)
+        writer.writerow(row)
+
+
+def initialize_msc_aux_audit(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MSC_AUX_AUDIT_FIELDS)
+        writer.writeheader()
+
+
+def append_msc_aux_audit(path, row):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=MSC_AUX_AUDIT_FIELDS)
         writer.writerow(row)
 
 
@@ -356,6 +404,7 @@ def build_model(config, device):
         pretrained_path=pretrained_path,
         pretrain_mode=config["pretrain_mode"],
         segment_context_mode=config["segment_context_mode"],
+        msc_aux_mode=config["msc_aux_mode"],
     ).to(device)
     return model
 
@@ -568,10 +617,85 @@ def merge_graph_cache_edges(
     return merged_edge_index, merged_edge_weight
 
 
-def build_data(points, edge_index, labels, edge_weight=None):
+def unpack_batch(batch):
+    if len(batch) == 5:
+        points, labels, adjs, trace_id, coordinates = batch
+    else:
+        points, labels, adjs, trace_id = batch
+        coordinates = None
+    return points, labels, adjs, trace_id, coordinates
+
+
+def prepare_aux_features(coordinates, points, device):
+    if coordinates is None:
+        raise ValueError("AUX_COORDINATES_NOT_FOUND")
+    if isinstance(coordinates, torch.Tensor):
+        coordinates = coordinates.clone().detach()
+        if coordinates.ndim == 3 and coordinates.shape[0] == 1:
+            coordinates = coordinates.squeeze(0)
+    aux_features = build_motion_state_features(coordinates, points.detach().cpu())
+    return aux_features.to(torch.float32).to(device)
+
+
+def get_cached_aux_features(coordinates, points, device, aux_cache, split, trace_id):
+    if aux_cache is None:
+        return prepare_aux_features(coordinates, points, device)
+    key = (split, normalize_trace_id(trace_id), tensor_content_hash(points))
+    cached = aux_cache.get(key)
+    if cached is None:
+        cached = prepare_aux_features(coordinates, points, torch.device("cpu")).cpu()
+        aux_cache[key] = cached
+    return cached.to(torch.float32).to(device)
+
+
+def summarize_aux_features(aux_features):
+    if aux_features is None or aux_features.numel() == 0:
+        return dict(
+            stationary_point_rate=0.0,
+            high_turn_point_rate=0.0,
+            local_density_1m_mean=0.0,
+            local_step_mean_m_mean=0.0,
+        )
+    aux = aux_features.detach().to(torch.float32)
+    stationary = aux[:, AUX_FEATURE_NAMES.index("stationary_flag")]
+    turn = aux[:, AUX_FEATURE_NAMES.index("local_turn_angle_deg")]
+    density_1m = aux[:, AUX_FEATURE_NAMES.index("local_density_1m")]
+    local_step_mean = aux[:, AUX_FEATURE_NAMES.index("local_step_mean_m")]
+    high_turn = (turn >= 45.0) & (stationary < 0.5)
+    return dict(
+        stationary_point_rate=float(stationary.mean().detach().cpu().item()),
+        high_turn_point_rate=float(high_turn.to(torch.float32).mean().detach().cpu().item()),
+        local_density_1m_mean=float(density_1m.mean().detach().cpu().item()),
+        local_step_mean_m_mean=float(local_step_mean.mean().detach().cpu().item()),
+    )
+
+
+def append_current_msc_aux_audit(path, model, aux_features, epoch, split, trace_id):
+    if path is None:
+        return
+    segment_stats = model.get_segment_context_statistics()
+    aux_stats = model.get_msc_aux_statistics()
+    feature_stats = summarize_aux_features(aux_features)
+    row = dict(
+        epoch=epoch,
+        split=split,
+        trace_id=normalize_trace_id(trace_id),
+        segment_scale=float(segment_stats.get("segment_scale", 0.0)),
+        context_to_fused_ratio=float(segment_stats.get("context_to_fused_ratio", 0.0)),
+        **{field: float(aux_stats.get(field, 0.0)) for field in MSC_AUX_AUDIT_FIELDS if field in aux_stats},
+        **feature_stats,
+    )
+    for field in MSC_AUX_AUDIT_FIELDS:
+        row.setdefault(field, 0.0 if field not in ("split", "trace_id") else "")
+    append_msc_aux_audit(path, row)
+
+
+def build_data(points, edge_index, labels, edge_weight=None, aux_features=None):
     data = Data(x=points, edge_index=edge_index, y=labels)
     if edge_weight is not None:
         data.edge_weight = edge_weight.to(torch.float32).to(points.device)
+    if aux_features is not None:
+        data.aux_features = aux_features.to(torch.float32).to(points.device)
     return data
 
 
@@ -581,6 +705,8 @@ def evaluate_test_once(
     test_graph_cache,
     device,
     audit_path=None,
+    msc_aux_audit_path=None,
+    aux_required=False,
     run_name=None,
     epoch=None,
 ):
@@ -590,9 +716,11 @@ def evaluate_test_once(
     test_num_samples = 0
     start_time = time.time()
     with torch.no_grad():
-        for batch_id, (points, labels, adjs, trace_id) in enumerate(test_loader()):
+        for batch_id, batch in enumerate(test_loader()):
+            points, labels, adjs, trace_id, coordinates = unpack_batch(batch)
             points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
             labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
+            aux_features = prepare_aux_features(coordinates, points, device) if aux_required else None
             edge_index, edge_weight = merge_graph_cache_edges(
                 adjs,
                 test_graph_cache,
@@ -605,8 +733,9 @@ def evaluate_test_once(
                 epoch=epoch,
                 batch_id=batch_id,
             )
-            data = build_data(points, edge_index, labels, edge_weight=edge_weight)
+            data = build_data(points, edge_index, labels, edge_weight=edge_weight, aux_features=aux_features)
             pred = model.test_step(data)
+            append_current_msc_aux_audit(msc_aux_audit_path, model, aux_features, epoch, "test", trace_id)
             all_predictions.extend(pred.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             test_num_samples += points.shape[0]
@@ -650,10 +779,13 @@ def main():
     logger = Logger(model_name="VIT_GIN_Parallel", dataset_kind="paddy_small")
     logger.log_environment_info()
     cache_dir = Path(config["cache_dir"])
+    aux_required = config["msc_aux_mode"] != "none"
     if (cache_dir / "train.pt").exists() and (cache_dir / "valid.pt").exists():
-        train_dataset = CachedGraphDataset(cache_dir / "train.pt", mode='train')
-        valid_dataset = CachedGraphDataset(cache_dir / "valid.pt", mode='valid')
+        train_dataset = CachedGraphDataset(cache_dir / "train.pt", mode='train', return_coordinates=aux_required)
+        valid_dataset = CachedGraphDataset(cache_dir / "valid.pt", mode='valid', return_coordinates=aux_required)
     else:
+        if aux_required:
+            raise SystemExit("AUX_COORDINATES_NOT_FOUND")
         train_path = dict(
             gnss="../dataset_5/dataset_high/paddy/sampled_paddy_43",
             adj="../dataset_5/dataset_high/paddy/sampled_paddy_adj",
@@ -670,8 +802,10 @@ def main():
     test_loader = None
     if not config["skip_test"]:
         if (cache_dir / "test.pt").exists():
-            test_dataset = CachedGraphDataset(cache_dir / "test.pt", mode='test')
+            test_dataset = CachedGraphDataset(cache_dir / "test.pt", mode='test', return_coordinates=aux_required)
         else:
+            if aux_required:
+                raise SystemExit("AUX_COORDINATES_NOT_FOUND")
             test_path = dict(
                 gnss="../dataset_5/dataset_high/paddy/sampled_paddy_43",
                 adj="../dataset_5/dataset_high/paddy/sampled_paddy_adj",
@@ -689,6 +823,10 @@ def main():
     if config["segment_context_mode"] == "msc":
         segment_context_audit_path = Path("diagnostics") / f"{run_name}_segment_context_audit.csv"
         initialize_segment_context_audit(segment_context_audit_path)
+    msc_aux_audit_path = None
+    if aux_required:
+        msc_aux_audit_path = Path("diagnostics") / f"{run_name}_msc_aux_audit.csv"
+        initialize_msc_aux_audit(msc_aux_audit_path)
     logger.log_dataset_info(train_dataset, valid_dataset, test_dataset)
     # Create data loaders using PyTorch DataLoader
     train_loader = FieldRoadDataLoader(train_dataset, batch_size=1, shuffle=True, drop_last=True)
@@ -749,6 +887,7 @@ def main():
     train_log_rows = []
     best_valid_metrics = None
     best_test_metrics = None
+    aux_feature_cache = {} if aux_required else None
     for pass_num in range(total_epochs):
         if config["segment_context_mode"] == "msc":
             model.reset_segment_context_statistics()
@@ -759,9 +898,15 @@ def main():
         num_samples = 0
         all_predictions = []
         all_labels = []
-        for batch_id, (points, labels, adjs, trace_id) in enumerate(train_loader()):
+        for batch_id, batch in enumerate(train_loader()):
+            points, labels, adjs, trace_id, coordinates = unpack_batch(batch)
             points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
             labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
+            aux_features = (
+                get_cached_aux_features(coordinates, points, device, aux_feature_cache, "train", trace_id)
+                if aux_required
+                else None
+            )
             edge_index, edge_weight = merge_graph_cache_edges(
                 adjs,
                 train_graph_cache,
@@ -774,8 +919,9 @@ def main():
                 epoch=pass_num + 1,
                 batch_id=batch_id,
             )
-            data = build_data(points, edge_index, labels, edge_weight=edge_weight)
+            data = build_data(points, edge_index, labels, edge_weight=edge_weight, aux_features=aux_features)
             pred, loss, acc = model.train_step(data, labels, optimizer, loss_config)
+            append_current_msc_aux_audit(msc_aux_audit_path, model, aux_features, pass_num + 1, "train", trace_id)
             trajectory_length = points.shape[0]
             train_loss_total += loss * trajectory_length
             train_acc_total += acc * trajectory_length
@@ -803,9 +949,15 @@ def main():
             num_samples = 0
             all_predictions = []
             all_labels = []
-            for batch_id, (points, labels, adjs, trace_id) in enumerate(valid_loader()):
+            for batch_id, batch in enumerate(valid_loader()):
+                points, labels, adjs, trace_id, coordinates = unpack_batch(batch)
                 points = points.clone().detach().to(torch.float32).squeeze(0).to(device)
                 labels = labels.clone().detach().to(torch.int64).squeeze().to(device)
+                aux_features = (
+                    get_cached_aux_features(coordinates, points, device, aux_feature_cache, "valid", trace_id)
+                    if aux_required
+                    else None
+                )
                 edge_index, edge_weight = merge_graph_cache_edges(
                     adjs,
                     valid_graph_cache,
@@ -818,8 +970,9 @@ def main():
                     epoch=pass_num + 1,
                     batch_id=batch_id,
                 )
-                data = build_data(points, edge_index, labels, edge_weight=edge_weight)
+                data = build_data(points, edge_index, labels, edge_weight=edge_weight, aux_features=aux_features)
                 pred, loss, acc = model.valid_step(data, labels, None)
+                append_current_msc_aux_audit(msc_aux_audit_path, model, aux_features, pass_num + 1, "valid", trace_id)
                 trajectory_length = points.shape[0]
                 valid_loss_total += loss * trajectory_length
                 valid_acc_total += acc * trajectory_length
@@ -902,6 +1055,8 @@ def main():
             test_graph_cache,
             device,
             audit_path=graph_dedup_audit_path,
+            msc_aux_audit_path=msc_aux_audit_path,
+            aux_required=aux_required,
             run_name=run_name,
             epoch=test_epoch,
         )

@@ -9,6 +9,7 @@ from .utils import label_smoothing_loss
 from sklearn.metrics import precision_score, recall_score, f1_score, classification_report
 from thop import profile
 from .GIN import GIN
+from .MSCResidualControlModules import MSCControlFusion
 from .SegmentContextModule import MultiScaleSegmentContextModule
 from .VIT import VIT
 
@@ -17,11 +18,12 @@ class VIT_GIN_Parallel(nn.Module):
                  num_heads=6, mlp_ratio=4.,qkv_bias=True,use_DropKey=True,
                  drop_rate=0., attn_drop_rate=0.0, drop_path_rate=0.0, embed_layer=None, norm_layer=None,
                  act_layer=None,pretrained_path=None, pretrain_mode="current", num_edge_types=4,
-                 segment_context_mode="none", segment_context_dim=216):
+                 segment_context_mode="none", segment_context_dim=216, msc_aux_mode="none", msc_aux_dim=11):
 
         super().__init__()
         self.img_size = img_size
         self.segment_context_mode = segment_context_mode
+        self.msc_aux_mode = msc_aux_mode
         self.vision = VIT(
             img_size=img_size,          
             patch_size=patch_size,         
@@ -50,12 +52,22 @@ class VIT_GIN_Parallel(nn.Module):
         self.head_graph = nn.Linear(embed_dim,num_classes)
         fused_dim = 2 * embed_dim
         self.head = nn.Linear(fused_dim,num_classes)
+        if msc_aux_mode not in ("none", "sd", "rc", "rcsd"):
+            raise ValueError(f"Unsupported msc_aux_mode: {msc_aux_mode}")
         if segment_context_mode == "msc":
             if segment_context_dim != fused_dim:
                 raise ValueError(f"segment_context_dim={segment_context_dim} does not match fused_dim={fused_dim}")
             self.segment_context = MultiScaleSegmentContextModule(dim=segment_context_dim)
+            self.msc_control_fusion = (
+                MSCControlFusion(dim=segment_context_dim, aux_dim=msc_aux_dim, mode=msc_aux_mode)
+                if msc_aux_mode != "none"
+                else None
+            )
         elif segment_context_mode == "none":
+            if msc_aux_mode != "none":
+                raise ValueError("msc_aux_mode requires segment_context_mode=msc")
             self.segment_context = None
+            self.msc_control_fusion = None
         else:
             raise ValueError(f"Unsupported segment_context_mode: {segment_context_mode}")
         if pretrained_path is not None:
@@ -76,9 +88,15 @@ class VIT_GIN_Parallel(nn.Module):
     def reset_segment_context_statistics(self):
         if self.segment_context is not None and hasattr(self.segment_context, "reset_statistics"):
             self.segment_context.reset_statistics()
+        if self.msc_control_fusion is not None and hasattr(self.msc_control_fusion, "reset_statistics"):
+            self.msc_control_fusion.reset_statistics()
     def get_segment_context_statistics(self):
         if self.segment_context is not None and hasattr(self.segment_context, "get_statistics"):
             return self.segment_context.get_statistics()
+        return {}
+    def get_msc_aux_statistics(self):
+        if self.msc_control_fusion is not None and hasattr(self.msc_control_fusion, "get_statistics"):
+            return self.msc_control_fusion.get_statistics()
         return {}
     def forward(self, data):
         x = data.x.view(-1,1,43,1)
@@ -91,7 +109,16 @@ class VIT_GIN_Parallel(nn.Module):
         out_graph = self.head_graph(x_graph)
         out = torch.cat([x_image, x_graph], dim=1)
         if self.segment_context is not None:
-            out = self.segment_context(out)
+            if self.msc_control_fusion is None:
+                out = self.segment_context(out)
+            else:
+                aux_features = getattr(data, "aux_features", None)
+                if aux_features is None:
+                    raise ValueError("AUX_FEATURES_REQUIRED")
+                msc_context, segment_scale = self.segment_context.compute_context(out)
+                enhanced = self.msc_control_fusion(out, msc_context, segment_scale, aux_features)
+                self.segment_context.record_statistics(out, enhanced, msc_context)
+                out = enhanced
         out = self.head(out)
         return out,out_image,out_graph
     def forward_loss(self,pred,label,loss_config,pred_image=None,pred_graph=None):
@@ -168,6 +195,8 @@ class VIT_GIN_Parallel(nn.Module):
         rows, cols = torch.nonzero(dummy_adjs, as_tuple=True)
         edge_index = torch.stack([rows, cols]).to(device)
         dummy_data = Data(x=dummy_points, edge_index=edge_index)
+        if self.msc_control_fusion is not None:
+            dummy_data.aux_features = torch.zeros((dummy_points.shape[0], 11), dtype=dummy_points.dtype, device=device)
         macs, params = profile(self, inputs=(dummy_data,), verbose=False)
         self.clear_thop_hooks_and_attributes()
         return macs, params
