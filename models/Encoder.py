@@ -9,16 +9,19 @@ from .utils import label_smoothing_loss
 from sklearn.metrics import precision_score, recall_score, f1_score, classification_report
 from thop import profile
 from .GIN import GIN
+from .SegmentContextModule import MultiScaleSegmentContextModule
 from .VIT import VIT
 
 class VIT_GIN_Parallel(nn.Module):
     def __init__(self, img_size=43, patch_size=1, in_chans=1, num_classes=2, embed_dim=108, depth=1,
                  num_heads=6, mlp_ratio=4.,qkv_bias=True,use_DropKey=True,
                  drop_rate=0., attn_drop_rate=0.0, drop_path_rate=0.0, embed_layer=None, norm_layer=None,
-                 act_layer=None,pretrained_path=None, pretrain_mode="current", num_edge_types=4):
+                 act_layer=None,pretrained_path=None, pretrain_mode="current", num_edge_types=4,
+                 segment_context_mode="none", segment_context_dim=216):
 
         super().__init__()
         self.img_size = img_size
+        self.segment_context_mode = segment_context_mode
         self.vision = VIT(
             img_size=img_size,          
             patch_size=patch_size,         
@@ -45,7 +48,16 @@ class VIT_GIN_Parallel(nn.Module):
         self.head_image = nn.Linear(embed_dim,num_classes)
         self.image_norm = nn.LayerNorm(embed_dim)
         self.head_graph = nn.Linear(embed_dim,num_classes)
-        self.head = nn.Linear(2*embed_dim,num_classes)
+        fused_dim = 2 * embed_dim
+        self.head = nn.Linear(fused_dim,num_classes)
+        if segment_context_mode == "msc":
+            if segment_context_dim != fused_dim:
+                raise ValueError(f"segment_context_dim={segment_context_dim} does not match fused_dim={fused_dim}")
+            self.segment_context = MultiScaleSegmentContextModule(dim=segment_context_dim)
+        elif segment_context_mode == "none":
+            self.segment_context = None
+        else:
+            raise ValueError(f"Unsupported segment_context_mode: {segment_context_mode}")
         if pretrained_path is not None:
             self.load_pretrained_encoder(pretrained_path)
     def forward_features(self, x, edge_index, mask_ratio_image=0,mask_ratio_graph=0, edge_weight=None):
@@ -61,6 +73,13 @@ class VIT_GIN_Parallel(nn.Module):
         if hasattr(self.graph, "get_pretrain_edge_statistics"):
             return self.graph.get_pretrain_edge_statistics()
         return {}
+    def reset_segment_context_statistics(self):
+        if self.segment_context is not None and hasattr(self.segment_context, "reset_statistics"):
+            self.segment_context.reset_statistics()
+    def get_segment_context_statistics(self):
+        if self.segment_context is not None and hasattr(self.segment_context, "get_statistics"):
+            return self.segment_context.get_statistics()
+        return {}
     def forward(self, data):
         x = data.x.view(-1,1,43,1)
         edge_index = data.edge_index
@@ -71,6 +90,8 @@ class VIT_GIN_Parallel(nn.Module):
         out_image = self.head_image(x_image)
         out_graph = self.head_graph(x_graph)
         out = torch.cat([x_image, x_graph], dim=1)
+        if self.segment_context is not None:
+            out = self.segment_context(out)
         out = self.head(out)
         return out,out_image,out_graph
     def forward_loss(self,pred,label,loss_config,pred_image=None,pred_graph=None):

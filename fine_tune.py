@@ -69,6 +69,11 @@ def parse_args():
         choices=["current", "edge_weight", "edge_type_weight"],
         default="current",
     )
+    parser.add_argument(
+        "--segment_context_mode",
+        choices=["none", "msc"],
+        default="none",
+    )
     return parser.parse_args()
 
 
@@ -97,6 +102,7 @@ def resolve_config(args, run_name, run_dir):
         cache_dir=args.cache_dir,
         graph_cache_path=graph_cache_path,
         pretrain_mode=args.pretrain_mode,
+        segment_context_mode=args.segment_context_mode,
         runtime_num_threads=get_runtime_thread_count(),
     )
 
@@ -127,6 +133,21 @@ GRAPH_DEDUP_AUDIT_FIELDS = [
     "merged_edges_after_dedup",
 ]
 
+SEGMENT_CONTEXT_AUDIT_FIELDS = [
+    "epoch",
+    "segment_scale",
+    "train_loss",
+    "valid_loss",
+    "valid_accuracy",
+    "valid_macro_f1",
+    "valid_road_f1",
+    "valid_field_f1",
+    "fused_norm_mean_before_msc",
+    "fused_norm_mean_after_msc",
+    "context_norm_mean",
+    "context_to_fused_ratio",
+]
+
 
 def initialize_graph_dedup_audit(path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +160,20 @@ def append_graph_dedup_audit(path, row):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=GRAPH_DEDUP_AUDIT_FIELDS)
+        writer.writerow(row)
+
+
+def initialize_segment_context_audit(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SEGMENT_CONTEXT_AUDIT_FIELDS)
+        writer.writeheader()
+
+
+def append_segment_context_audit(path, row):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SEGMENT_CONTEXT_AUDIT_FIELDS)
         writer.writerow(row)
 
 
@@ -320,6 +355,7 @@ def build_model(config, device):
         drop_path_rate=0.1,
         pretrained_path=pretrained_path,
         pretrain_mode=config["pretrain_mode"],
+        segment_context_mode=config["segment_context_mode"],
     ).to(device)
     return model
 
@@ -649,6 +685,10 @@ def main():
     if config["graph_cache_path"] is not None:
         graph_dedup_audit_path = Path("diagnostics") / "graph_cache_dedup_audit.csv"
         initialize_graph_dedup_audit(graph_dedup_audit_path)
+    segment_context_audit_path = None
+    if config["segment_context_mode"] == "msc":
+        segment_context_audit_path = Path("diagnostics") / f"{run_name}_segment_context_audit.csv"
+        initialize_segment_context_audit(segment_context_audit_path)
     logger.log_dataset_info(train_dataset, valid_dataset, test_dataset)
     # Create data loaders using PyTorch DataLoader
     train_loader = FieldRoadDataLoader(train_dataset, batch_size=1, shuffle=True, drop_last=True)
@@ -710,6 +750,8 @@ def main():
     best_valid_metrics = None
     best_test_metrics = None
     for pass_num in range(total_epochs):
+        if config["segment_context_mode"] == "msc":
+            model.reset_segment_context_statistics()
         model.train()
         epoch_start_time = time.time()
         train_loss_total = 0.0
@@ -788,19 +830,20 @@ def main():
             valid_losses.append(avg_valid_loss)
             avg_valid_acc = valid_acc_total / num_samples
             valid_accuracies.append(avg_valid_acc)
+            all_predictions = np.array(all_predictions)
+            all_labels = np.array(all_labels)
+            epoch_valid_metrics = valid_metric_summary(
+                all_predictions,
+                all_labels,
+                pass_num + 1,
+                avg_valid_loss,
+                avg_valid_acc,
+            )
             if avg_valid_acc > best_valid_acc:
                 best_valid_acc = avg_valid_acc
-                all_predictions = np.array(all_predictions)
-                all_labels = np.array(all_labels)
                 class_result_valid = model.calculate_classification_metrics(all_predictions, all_labels)
                 torch.save(model.state_dict(), run_dir / "best_model.pt")
-                best_valid_metrics = valid_metric_summary(
-                    all_predictions,
-                    all_labels,
-                    pass_num + 1,
-                    avg_valid_loss,
-                    avg_valid_acc,
-                )
+                best_valid_metrics = epoch_valid_metrics
             valid_end_time = time.time()
             epoch_valid_time = valid_end_time - train_end_time
             total_valid_time += epoch_valid_time
@@ -829,6 +872,25 @@ def main():
                     lr=float(optimizer.param_groups[0]['lr']),
                 )
             )
+            if segment_context_audit_path is not None:
+                segment_stats = model.get_segment_context_statistics()
+                append_segment_context_audit(
+                    segment_context_audit_path,
+                    dict(
+                        epoch=pass_num + 1,
+                        segment_scale=float(segment_stats.get("segment_scale", 0.0)),
+                        train_loss=float(avg_train_loss),
+                        valid_loss=float(avg_valid_loss),
+                        valid_accuracy=float(avg_valid_acc),
+                        valid_macro_f1=float(epoch_valid_metrics["valid_macro_f1"]),
+                        valid_road_f1=float(epoch_valid_metrics["valid_road_f1"]),
+                        valid_field_f1=float(epoch_valid_metrics["valid_field_f1"]),
+                        fused_norm_mean_before_msc=float(segment_stats.get("fused_norm_mean_before_msc", 0.0)),
+                        fused_norm_mean_after_msc=float(segment_stats.get("fused_norm_mean_after_msc", 0.0)),
+                        context_norm_mean=float(segment_stats.get("context_norm_mean", 0.0)),
+                        context_to_fused_ratio=float(segment_stats.get("context_to_fused_ratio", 0.0)),
+                    ),
+                )
     if not config["skip_test"] and test_loader is not None:
         best_model_path = run_dir / "best_model.pt"
         if best_model_path.exists():
