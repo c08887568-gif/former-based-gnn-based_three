@@ -98,7 +98,7 @@ class VIT_GIN_Parallel(nn.Module):
         if self.msc_control_fusion is not None and hasattr(self.msc_control_fusion, "get_statistics"):
             return self.msc_control_fusion.get_statistics()
         return {}
-    def forward(self, data):
+    def forward(self, data, return_features=False):
         x = data.x.view(-1,1,43,1)
         edge_index = data.edge_index
         edge_weight = getattr(data, "edge_weight", None)
@@ -119,7 +119,16 @@ class VIT_GIN_Parallel(nn.Module):
                 enhanced = self.msc_control_fusion(out, msc_context, segment_scale, aux_features)
                 self.segment_context.record_statistics(out, enhanced, msc_context)
                 out = enhanced
-        out = self.head(out)
+        enhanced_feature = out
+        out = self.head(enhanced_feature)
+        if return_features:
+            aux_dict = dict(
+                enhanced_feature=enhanced_feature,
+                base_logits=out,
+                out_image=out_image,
+                out_graph=out_graph,
+            )
+            return out,out_image,out_graph,aux_dict
         return out,out_image,out_graph
     def forward_loss(self,pred,label,loss_config,pred_image=None,pred_graph=None):
         if loss_config is None:
