@@ -3,6 +3,7 @@ import csv
 import hashlib
 import json
 import os
+import random
 import sys
 import time
 from datetime import datetime
@@ -63,6 +64,7 @@ def parse_args():
     parser.add_argument("--dry_run", type=str2bool, nargs="?", const=True, default=False)
     parser.add_argument("--skip_test", type=str2bool, nargs="?", const=True, default=True)
     parser.add_argument("--epochs", type=int, default=TOTAL_EPOCHS)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cache_dir", default="cache/wheat_non_iid")
     parser.add_argument("--graph_cache_path", default=None)
     parser.add_argument(
@@ -105,6 +107,7 @@ def resolve_config(args, run_name, run_dir):
         dry_run=args.dry_run,
         skip_test=args.skip_test,
         total_epochs=args.epochs,
+        seed=args.seed,
         cache_dir=args.cache_dir,
         graph_cache_path=graph_cache_path,
         pretrain_mode=args.pretrain_mode,
@@ -126,6 +129,14 @@ def write_csv(path, fieldnames, rows):
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def set_random_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 GRAPH_DEDUP_AUDIT_FIELDS = [
@@ -753,6 +764,7 @@ def main():
     run_dir = Path("runs") / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     config = resolve_config(args, run_name, run_dir)
+    set_random_seed(config["seed"])
     write_run_metadata(run_dir, config)
 
     if config["use_pretrain"] and (

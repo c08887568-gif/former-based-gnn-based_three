@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--msc_aux_mode", choices=["none", "sd", "rc", "rcsd"], default="none")
     parser.add_argument("--max_len", type=int, default=1000)
     parser.add_argument("--near_boundary", type=int, default=20)
+    parser.add_argument("--splits", default="valid,test", help="Comma-separated splits to evaluate, e.g. train,valid,test.")
     parser.add_argument("--force_eval", action="store_true")
     return parser.parse_args()
 
@@ -171,16 +172,21 @@ def cohen_d(a, b):
     return float((np.mean(b) - np.mean(a)) / pooled)
 
 
-def prediction_paths(output_dir):
+def selected_splits(args):
+    return [item.strip() for item in str(args.splits).split(",") if item.strip()]
+
+
+def prediction_paths(output_dir, splits=("valid", "test")):
     output_dir = Path(output_dir)
     return {
-        "valid": output_dir / "valid_point_predictions_with_features.csv",
-        "test": output_dir / "test_point_predictions_with_features.csv",
+        split: output_dir / f"{split}_point_predictions_with_features.csv"
+        for split in splits
     }
 
 
 def generate_predictions_if_needed(args):
-    paths = prediction_paths(args.output_dir)
+    splits = selected_splits(args)
+    paths = prediction_paths(args.output_dir, splits)
     if not args.force_eval and all(path.exists() for path in paths.values()):
         return
 
@@ -205,10 +211,10 @@ def generate_predictions_if_needed(args):
 
     graph_caches = {
         split: load_graph_cache_split(args.graph_cache_path, split, required=True)
-        for split in ("valid", "test")
+        for split in splits
     }
 
-    for split in ("valid", "test"):
+    for split in splits:
         out_path = paths[split]
         out_path.parent.mkdir(parents=True, exist_ok=True)
         items = torch.load(Path(args.cache_dir) / f"{split}.pt", map_location="cpu")
@@ -395,9 +401,9 @@ def add_geometry_features(rows, max_len=1000, near_boundary=20):
             start = end + 1
 
 
-def load_point_rows(output_dir):
+def load_point_rows(output_dir, splits=("valid", "test")):
     rows = []
-    for split, path in prediction_paths(output_dir).items():
+    for split, path in prediction_paths(output_dir, splits).items():
         split_rows = read_csv(path)
         for row in split_rows:
             row["split"] = row.get("split") or split
@@ -438,7 +444,7 @@ def metric_summary(rows):
 
 def write_error_summary(args, rows):
     out_rows = []
-    for split in ("valid", "test"):
+    for split in selected_splits(args):
         split_rows = [row for row in rows if row["split"] == split]
         summary = metric_summary(split_rows)
         if summary:
@@ -1101,7 +1107,7 @@ def main():
     args = parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     generate_predictions_if_needed(args)
-    rows = load_point_rows(args.output_dir)
+    rows = load_point_rows(args.output_dir, selected_splits(args))
     summaries = write_error_summary(args, rows)
     segments = make_error_segments(args, rows)
     long_segments, cause_stats = long_error_causes(args, segments)

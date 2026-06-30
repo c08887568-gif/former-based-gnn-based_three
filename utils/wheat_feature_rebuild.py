@@ -102,30 +102,33 @@ def _rolling_kurt(series: pd.Series) -> pd.Series:
     return series.rolling(window=ROLLING_WINDOW, min_periods=1).apply(_window_kurt, raw=False).fillna(0.0)
 
 
-def _projected_xy(lon: np.ndarray, lat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def haversine_m(lon1, lat1, lon2, lat2):
     radius = 6371000.0
-    lat0 = np.deg2rad(float(lat[0])) if len(lat) else 0.0
-    x = np.deg2rad(lon - float(lon[0])) * radius * np.cos(lat0)
-    y = np.deg2rad(lat - float(lat[0])) * radius
-    return x, y
+    lon1 = np.deg2rad(lon1)
+    lat1 = np.deg2rad(lat1)
+    lon2 = np.deg2rad(lon2)
+    lat2 = np.deg2rad(lat2)
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * radius * np.arctan2(np.sqrt(a), np.sqrt(np.maximum(1.0 - a, 0.0)))
 
 
-def _geometry_feature(raw_df: pd.DataFrame) -> np.ndarray:
-    """Approximate the historical geometric column that is not present in repo code."""
-    lon = raw_df["经度"].to_numpy(dtype=float)
-    lat = raw_df["纬度"].to_numpy(dtype=float)
-    speed = raw_df["速度"].to_numpy(dtype=float)
-    direction = raw_df["方向"].to_numpy(dtype=float)
-    if len(raw_df) == 0:
-        return np.array([], dtype=float)
-
-    x, y = _projected_xy(lon, lat)
-    step = np.zeros(len(raw_df), dtype=float)
-    if len(raw_df) > 1:
-        step[1:] = np.sqrt(np.diff(x) ** 2 + np.diff(y) ** 2)
-    direction_delta = np.abs(np.diff(np.r_[direction[:1], direction]))
-    local_motion = pd.Series(step).rolling(window=4, min_periods=1).mean().to_numpy()
-    return (direction_delta + speed * 5.0 + local_motion).astype(float)
+def feature_col5_geometry(lon, lat, horizon=10) -> np.ndarray:
+    lon = np.asarray(lon, dtype=float)
+    lat = np.asarray(lat, dtype=float)
+    n = len(lon)
+    out = np.zeros(n, dtype=float)
+    for idx in range(n):
+        if idx + horizon < n:
+            neighbors = range(idx + 1, idx + horizon + 1)
+        else:
+            neighbors = range(max(0, idx - horizon), idx)
+        total = 0.0
+        for other in neighbors:
+            total += float(haversine_m(lon[idx], lat[idx], lon[other], lat[other]))
+        out[idx] = total
+    return out
 
 
 def rebuild_wheat_43_features(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -157,7 +160,7 @@ def rebuild_wheat_43_features(raw_df: pd.DataFrame) -> pd.DataFrame:
     out[2] = base["direction_diff"]
     out[3] = base["direction_current"]
     out[4] = base["direction_alt"]
-    out[5] = _geometry_feature(df)
+    out[5] = feature_col5_geometry(df["经度"].to_numpy(dtype=float), df["纬度"].to_numpy(dtype=float))
 
     std_order = ["speed_diff", "direction_alt", "direction_diff", "direction_current", "speed"]
     median_order = ["speed_diff", "direction_diff", "direction_alt", "direction_current", "speed"]
